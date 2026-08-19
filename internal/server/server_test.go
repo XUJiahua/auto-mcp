@@ -81,17 +81,17 @@ func TestNewMCPServer_SemiE2E(t *testing.T) {
 
 	// Check for specific routes that should be included
 	expectedRoutes := map[string]string{
-		"POST /pet":                     "post_pet",
-		"PUT /pet":                      "put_pet",
-		"GET /pet/findByStatus":         "get_pet_findbystatus",
-		"GET /pet/{petId}":              "get_pet_petid",
-		"POST /pet/{petId}":             "post_pet_petid",
-		"POST /pet/{petId}/uploadImage": "post_pet_petid_uploadimage",
-		"GET /store/inventory":          "get_store_inventory",
-		"POST /store/order":             "post_store_order",
-		"GET /store/order/{orderId}":    "get_store_order_orderid",
-		"GET /user/logout":              "get_user_logout",
-		"GET /pet/findByTags":           "get_pet_findbytags",
+		"POST /pet":                     "addPet",
+		"PUT /pet":                      "updatePet",
+		"GET /pet/findByStatus":         "findPetsByStatus",
+		"GET /pet/{petId}":              "getPetById",
+		"POST /pet/{petId}":             "updatePetWithForm",
+		"POST /pet/{petId}/uploadImage": "uploadFile",
+		"GET /store/inventory":          "getInventory",
+		"POST /store/order":             "placeOrder",
+		"GET /store/order/{orderId}":    "getOrderById",
+		"GET /user/logout":              "logoutUser",
+		"GET /pet/findByTags":           "findPetsByTags",
 	}
 
 	// Build a map of actual routes for easier testing
@@ -112,16 +112,21 @@ func TestNewMCPServer_SemiE2E(t *testing.T) {
 
 	// Verify specific tool configurations for key endpoints
 	t.Run("Validate findbystatus endpoint", func(t *testing.T) {
-		findByStatusTool, ok := actualToolNameMap["get_pet_findbystatus"]
-		require.True(t, ok, "get_pet_findbystatus tool not found")
+		findByStatusTool, ok := actualToolNameMap["findPetsByStatus"]
+		require.True(t, ok, "findPetsByStatus tool not found")
 
-		// Check that query parameters are correctly defined
+		// Check that query parameters are correctly defined. The spec declares
+		// status as an array of enum'd strings; flattening it to a plain string
+		// would make the parameter unserialisable as repeated query keys.
 		params := findByStatusTool.Tool.InputSchema.Properties
 		statusParam, hasStatus := params["status"].(map[string]interface{})
-		assert.True(t, hasStatus, "Should have 'status' query parameter")
-		if hasStatus {
-			assert.Equal(t, "string", statusParam["type"], "Status parameter should be a string")
-		}
+		require.True(t, hasStatus, "Should have 'status' query parameter")
+		assert.Equal(t, "array", statusParam["type"], "Status parameter should keep its declared array type")
+		items, hasItems := statusParam["items"].(map[string]interface{})
+		require.True(t, hasItems, "Array parameter should keep its item schema")
+		assert.Equal(t, "string", items["type"])
+		assert.ElementsMatch(t, []interface{}{"available", "pending", "sold"}, items["enum"])
+		assert.Contains(t, findByStatusTool.Tool.InputSchema.Required, "status")
 
 		// Check the route configuration
 		assert.Equal(t, "GET", findByStatusTool.RouteConfig.Method)
@@ -129,8 +134,8 @@ func TestNewMCPServer_SemiE2E(t *testing.T) {
 	})
 
 	t.Run("Validate upload image endpoint", func(t *testing.T) {
-		uploadTool, ok := actualToolNameMap["post_pet_petid_uploadimage"]
-		require.True(t, ok, "post_pet_petid_uploadimage tool not found")
+		uploadTool, ok := actualToolNameMap["uploadFile"]
+		require.True(t, ok, "uploadFile tool not found")
 
 		// Test description override specified in the adjustment.yaml
 		assert.Contains(t, uploadTool.Tool.Description,
@@ -146,8 +151,8 @@ func TestNewMCPServer_SemiE2E(t *testing.T) {
 	})
 
 	t.Run("Validate store inventory endpoint", func(t *testing.T) {
-		inventoryTool, ok := actualToolNameMap["get_store_inventory"]
-		require.True(t, ok, "get_store_inventory tool not found")
+		inventoryTool, ok := actualToolNameMap["getInventory"]
+		require.True(t, ok, "getInventory tool not found")
 
 		// This endpoint should have no parameters in its path
 		assert.NotContains(t, inventoryTool.RouteConfig.Path, "{", "Inventory endpoint should not have path parameters")
@@ -266,17 +271,17 @@ func TestMCPServer_ListTools(t *testing.T) {
 
 		// Expected tool names
 		expectedTools := map[string]bool{
-			"post_pet":                   true,
-			"put_pet":                    true,
-			"get_pet_findbystatus":       true,
-			"get_pet_petid":              true,
-			"post_pet_petid":             true,
-			"post_pet_petid_uploadimage": true,
-			"get_store_inventory":        true,
-			"post_store_order":           true,
-			"get_store_order_orderid":    true,
-			"get_user_logout":            true,
-			"get_pet_findbytags":         true,
+			"addPet":            true,
+			"updatePet":         true,
+			"findPetsByStatus":  true,
+			"getPetById":        true,
+			"updatePetWithForm": true,
+			"uploadFile":        true,
+			"getInventory":      true,
+			"placeOrder":        true,
+			"getOrderById":      true,
+			"logoutUser":        true,
+			"findPetsByTags":    true,
 		}
 
 		// Verify all expected tools exist
@@ -292,7 +297,7 @@ func TestMCPServer_ListTools(t *testing.T) {
 	// Test getting a specific tool's details
 	t.Run("Tool Detail Test", func(t *testing.T) {
 		// Test the upload image endpoint which has a custom description
-		toolName := "post_pet_petid_uploadimage"
+		toolName := "uploadFile"
 
 		// Find the tool in the list of tools
 		var tool mcp.Tool
@@ -318,7 +323,7 @@ func TestMCPServer_ListTools(t *testing.T) {
 	// Test calling a tool
 	t.Run("Tool Call Test", func(t *testing.T) {
 		// Test the GET /pet/findByStatus endpoint (it's simple and doesn't require complex data)
-		toolName := "get_pet_findbystatus"
+		toolName := "findPetsByStatus"
 
 		// Create tool call request
 		request := mcp.CallToolRequest{}

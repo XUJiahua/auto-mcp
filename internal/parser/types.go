@@ -29,4 +29,6 @@ type SwaggerParser struct {
 	doc        *openapi3.T
 	routeTools []*RouteTool
 	adjuster   *Adjuster
+	// usedToolNames guards against a spec that repeats an operationId.
+	usedToolNames map[string]bool
 }

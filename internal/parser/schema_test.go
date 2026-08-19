@@ -6,6 +6,7 @@ import (
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSchemaToMCPOptions(t *testing.T) {
@@ -191,197 +192,98 @@ func TestSchemaToMCPOptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := schemaToMCPOptions(tt.schema, "test", tt.required, nil)
+			got := schemaToMCPOptions(tt.schema, "test", tt.required)
 			tt.check(t, got)
 		})
 	}
 }
 
-func TestCreateArrayOption(t *testing.T) {
-	tests := []struct {
-		name     string
-		schema   *openapi3.SchemaRef
-		baseOpts []mcp.PropertyOption
-		check    func(t *testing.T, got mcp.ToolOption)
-	}{
-		{
-			name: "array with items",
-			schema: &openapi3.SchemaRef{
-				Value: &openapi3.Schema{
-					Items: &openapi3.SchemaRef{
-						Value: &openapi3.Schema{
-							Type: &openapi3.Types{"string"},
-						},
-					},
-				},
-			},
-			baseOpts: []mcp.PropertyOption{mcp.Description("Test array")},
-			check: func(t *testing.T, got mcp.ToolOption) {
-				tool := mcp.NewTool("test", got)
-				assert.Equal(t, "test", tool.Name)
-				prop, ok := tool.InputSchema.Properties["test"].(map[string]interface{})
-				assert.True(t, ok)
-				assert.Equal(t, "array", prop["type"])
-				assert.Equal(t, "Test array", prop["description"])
-				if items, ok := prop["items"].(map[string]interface{}); ok {
-					assert.Equal(t, "string", items["type"])
-				}
-			},
-		},
-	}
+// The four schema shapes below used to be handled by separate create*Option
+// helpers. They now go through jsonSchemaFor, so the facets are asserted on the
+// converted schema itself.
+func TestJSONSchemaFor_ArrayKeepsItems(t *testing.T) {
+	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
+		Description: "Test array",
+		Items:       &openapi3.SchemaRef{Value: &openapi3.Schema{Type: &openapi3.Types{"string"}}},
+	}})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := createArrayOption(tt.schema, "test", tt.baseOpts)
-			tt.check(t, got)
-		})
-	}
+	assert.Equal(t, "array", got["type"], "items imply an array even when type is absent")
+	assert.Equal(t, "Test array", got["description"])
+	items, ok := got["items"].(map[string]any)
+	require.True(t, ok, "items must be a converted schema, not a kin-openapi struct")
+	assert.Equal(t, "string", items["type"])
 }
 
-func TestCreateObjectOption(t *testing.T) {
-	tests := []struct {
-		name     string
-		schema   *openapi3.SchemaRef
-		baseOpts []mcp.PropertyOption
-		check    func(t *testing.T, got mcp.ToolOption)
-	}{
-		{
-			name: "object with properties and constraints",
-			schema: &openapi3.SchemaRef{
-				Value: &openapi3.Schema{
-					Properties: map[string]*openapi3.SchemaRef{
-						"name": {
-							Value: &openapi3.Schema{
-								Type: &openapi3.Types{"string"},
-							},
-						},
-					},
-					Required: []string{"name"},
-					MaxProps: openapi3.Uint64Ptr(10),
-					MinProps: 1,
-					AdditionalProperties: openapi3.AdditionalProperties{
-						Has: openapi3.BoolPtr(true),
-					},
-				},
-			},
-			baseOpts: []mcp.PropertyOption{mcp.Description("Test object")},
-			check: func(t *testing.T, got mcp.ToolOption) {
-				tool := mcp.NewTool("test", got)
-				assert.Equal(t, "test", tool.Name)
-				prop, ok := tool.InputSchema.Properties["test"].(map[string]interface{})
-				assert.True(t, ok)
-				assert.Equal(t, "object", prop["type"])
-				assert.Equal(t, "Test object", prop["description"])
-
-				props, ok := prop["properties"].(map[string]interface{})
-				assert.True(t, ok)
-				assert.Contains(t, props, "name")
-
-				required, ok := prop["required"].([]string)
-				if !ok {
-					reqIface, ok := prop["required"].([]interface{})
-					assert.True(t, ok)
-					found := false
-					for _, r := range reqIface {
-						if s, ok := r.(string); ok && s == "name" {
-							found = true
-							break
-						}
-					}
-					assert.True(t, found, "'name' not found in required fields")
-				} else {
-					assert.Contains(t, required, "name")
-				}
-
-				assert.EqualValues(t, 10, prop["maxProperties"])
-				assert.EqualValues(t, 1, prop["minProperties"])
-				assert.Equal(t, true, prop["additionalProperties"])
-			},
+func TestJSONSchemaFor_ObjectKeepsPropertiesAndConstraints(t *testing.T) {
+	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
+		Description: "Test object",
+		Properties: map[string]*openapi3.SchemaRef{
+			"name": {Value: &openapi3.Schema{Type: &openapi3.Types{"string"}}},
 		},
-	}
+		Required:             []string{"name"},
+		MaxProps:             openapi3.Uint64Ptr(10),
+		MinProps:             1,
+		AdditionalProperties: openapi3.AdditionalProperties{Has: openapi3.BoolPtr(true)},
+	}})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := createObjectOption(tt.schema, "test", tt.baseOpts, nil)
-			tt.check(t, got)
-		})
-	}
+	assert.Equal(t, "object", got["type"])
+	assert.Equal(t, "Test object", got["description"])
+	props, ok := got["properties"].(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, props, "name")
+	assert.Equal(t, []string{"name"}, got["required"])
+	assert.EqualValues(t, 10, got["maxProperties"])
+	assert.EqualValues(t, 1, got["minProperties"])
+	assert.Equal(t, true, got["additionalProperties"])
 }
 
-func TestCreateStringOption(t *testing.T) {
-	tests := []struct {
-		name     string
-		schema   *openapi3.SchemaRef
-		baseOpts []mcp.PropertyOption
-		check    func(t *testing.T, got mcp.ToolOption)
-	}{
-		{
-			name: "string with all constraints",
-			schema: &openapi3.SchemaRef{
-				Value: &openapi3.Schema{
-					MaxLength:   openapi3.Uint64Ptr(100),
-					MinLength:   1,
-					Pattern:     "^[a-zA-Z]+$",
-					Enum:        []interface{}{"option1", "option2"},
-					Description: "Test string",
-				},
-			},
-			baseOpts: []mcp.PropertyOption{mcp.Description("Test string")},
-			check: func(t *testing.T, got mcp.ToolOption) {
-				tool := mcp.NewTool("test", got)
-				prop, ok := tool.InputSchema.Properties["test"].(map[string]interface{})
-				assert.True(t, ok)
-				assert.Equal(t, "Test string", prop["description"])
-				assert.EqualValues(t, 100, prop["maxLength"])
-				assert.EqualValues(t, 1, prop["minLength"])
-				assert.Equal(t, "^[a-zA-Z]+$", prop["pattern"])
-				assert.ElementsMatch(t, []interface{}{"option1", "option2"}, prop["enum"])
-			},
-		},
-	}
+func TestJSONSchemaFor_StringKeepsConstraints(t *testing.T) {
+	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
+		Type:        &openapi3.Types{"string"},
+		MaxLength:   openapi3.Uint64Ptr(100),
+		MinLength:   1,
+		Pattern:     "^[a-zA-Z]+$",
+		Enum:        []interface{}{"option1", "option2"},
+		Description: "Test string",
+	}})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := createStringOption(tt.schema, "test", tt.baseOpts)
-			tt.check(t, got)
-		})
-	}
+	assert.Equal(t, "string", got["type"])
+	assert.Equal(t, "Test string", got["description"])
+	assert.EqualValues(t, 100, got["maxLength"])
+	assert.EqualValues(t, 1, got["minLength"])
+	assert.Equal(t, "^[a-zA-Z]+$", got["pattern"])
+	assert.ElementsMatch(t, []interface{}{"option1", "option2"}, got["enum"])
 }
 
-func TestCreateNumberOption(t *testing.T) {
-	tests := []struct {
-		name     string
-		schema   *openapi3.SchemaRef
-		baseOpts []mcp.PropertyOption
-		check    func(t *testing.T, got mcp.ToolOption)
-	}{
-		{
-			name: "number with all constraints",
-			schema: &openapi3.SchemaRef{
-				Value: &openapi3.Schema{
-					Max:         openapi3.Float64Ptr(100),
-					Min:         openapi3.Float64Ptr(0),
-					MultipleOf:  openapi3.Float64Ptr(2),
-					Description: "Test number",
-				},
-			},
-			baseOpts: []mcp.PropertyOption{mcp.Description("Test number")},
-			check: func(t *testing.T, got mcp.ToolOption) {
-				tool := mcp.NewTool("test", got)
-				prop, ok := tool.InputSchema.Properties["test"].(map[string]interface{})
-				assert.True(t, ok)
-				assert.Equal(t, "Test number", prop["description"])
-				assert.Equal(t, 100.0, prop["maximum"])
-				assert.Equal(t, 0.0, prop["minimum"])
-				assert.Equal(t, 2.0, prop["multipleOf"])
-			},
-		},
-	}
+func TestJSONSchemaFor_NumberKeepsConstraints(t *testing.T) {
+	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
+		Type:        &openapi3.Types{"number"},
+		Max:         openapi3.Float64Ptr(100),
+		Min:         openapi3.Float64Ptr(0),
+		MultipleOf:  openapi3.Float64Ptr(2),
+		Description: "Test number",
+	}})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := createNumberOption(tt.schema, "test", tt.baseOpts)
-			tt.check(t, got)
-		})
+	assert.Equal(t, "number", got["type"])
+	assert.Equal(t, "Test number", got["description"])
+	assert.Equal(t, 100.0, got["maximum"])
+	assert.Equal(t, 0.0, got["minimum"])
+	assert.Equal(t, 2.0, got["multipleOf"])
+}
+
+// A schema that references itself must terminate instead of recursing until the
+// stack runs out; kin resolves $ref into pointers, so a self-referencing node
+// is the same pointer twice on one path.
+func TestJSONSchemaFor_CyclicRefTerminates(t *testing.T) {
+	node := &openapi3.Schema{
+		Type:       &openapi3.Types{"object"},
+		Properties: map[string]*openapi3.SchemaRef{"value": {Value: &openapi3.Schema{Type: &openapi3.Types{"string"}}}},
 	}
+	node.Properties["child"] = &openapi3.SchemaRef{Value: node}
+
+	got := jsonSchemaFor(&openapi3.SchemaRef{Value: node})
+
+	child, ok := got["properties"].(map[string]any)["child"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, recursionNote, child["description"])
 }
