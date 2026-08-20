@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -113,36 +114,52 @@ func TestOpenAPI31_RealUnionIsStillPublished(t *testing.T) {
 	assert.Len(t, branchList(t, method, "anyOf"), 2, "the null branch is not one of them")
 }
 
-// Some documents declare a type with `types`, plural. It is not an OpenAPI or
-// JSON Schema keyword: it is a field of swagger-core's Java model, and it appears
-// when that model is serialised directly instead of written out as a
-// specification. A real 425 KiB document used it for 220 of its 854 properties,
-// so a conformant parser reads a quarter of it as untyped.
-const pluralTypesSpec = `{
+// A document that does not conform is refused, with the reason it failed.
+//
+// The plural `types` key is the case that prompted this: it is a field of
+// swagger-core's Java schema model rather than an OpenAPI keyword, and it appears
+// when that model is serialised directly. Rewriting it was accommodating a broken
+// document; only conformant documents are in scope, so it is reported instead.
+// Silently loading it would publish a quarter of that document as untyped.
+const nonConformantSpec = `{
   "openapi": "3.1.0",
   "info": {"title": "Plural", "version": "1.0"},
   "paths": {"/api/items": {"post": {
     "operationId": "createItem",
     "requestBody": {"required": true, "content": {"application/json": {"schema": {
-      "types": ["object"],
-      "properties": {
-        "name":  {"types": ["string"], "maxLength": 255, "exampleSetFlag": false},
-        "count": {"types": ["integer"]},
-        "tags":  {"types": ["array"], "items": {"types": ["string"]}}}}}}},
+      "type": "object",
+      "properties": {"name": {"types": ["string"], "exampleSetFlag": false}}}}}},
     "responses": {"200": {"description": "OK"}}}}}}`
 
-func TestOpenAPI31_PluralTypesKeyIsUnderstood(t *testing.T) {
-	tools := toolsByName(t, parseSpec(t, pluralTypesSpec))
-	rt := tools["createItem"]
-	require.NotNil(t, rt)
+func TestConformance_NonConformantDocumentIsRefused(t *testing.T) {
+	p := NewSwaggerParser(NewAdjuster())
 
-	body := prop(t, rt.Tool, "body")
-	assert.Equal(t, "object", body["type"])
-	assert.Equal(t, "string", dig(t, body, "properties", "name")["type"])
-	assert.EqualValues(t, 255, dig(t, body, "properties", "name")["maxLength"])
-	assert.Equal(t, "integer", dig(t, body, "properties", "count")["type"])
-	assert.Equal(t, "array", dig(t, body, "properties", "tags")["type"])
-	assert.Equal(t, "string", dig(t, dig(t, body, "properties", "tags"), "items")["type"])
+	err := p.ParseReader(strings.NewReader(nonConformantSpec))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "types", "the reason names the offending field")
+}
+
+// A pattern Go cannot compile is not a conformance failure. OpenAPI mandates
+// ECMA-262 regular expressions, which permit lookahead; Go's RE2 does not
+// implement it. Refusing such a document would reject a correct specification for
+// a limitation of this implementation — and both real specifications measured use
+// exactly this construct.
+func TestConformance_UnsupportedRegexIsNotAConformanceFailure(t *testing.T) {
+	const spec = `{
+      "openapi": "3.1.0", "info": {"title": "Re", "version": "1.0"},
+      "paths": {"/api/items": {"post": {"operationId": "createItem",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {"name": {"type": "string",
+            "pattern": "(?!^[*.,'#_/-]+$)(?!.*\\./.*)^.*$"}}}}}},
+        "responses": {"200": {"description": "OK"}}}}}}`
+
+	tools := toolsByName(t, parseSpec(t, spec))
+	require.Contains(t, tools, "createItem")
+
+	name := dig(t, prop(t, tools["createItem"].Tool, "body"), "properties", "name")
+	assert.Equal(t, "string", name["type"])
 }
 
 // A schema that states no type permits any type. Defaulting to object narrows it

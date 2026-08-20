@@ -240,32 +240,31 @@ func TestSwaggerParser_GenerateTool(t *testing.T) {
 func TestSwaggerParser_ProcessOperations(t *testing.T) {
 	// Create a minimal OpenAPI spec
 	openapiSpec := []byte(`{
-		"openapi": "3.0.0",
-		"info": {
-			"title": "Test API",
-			"version": "1.0.0"
-		},
-		"paths": {
-			"/users": {
-				"get": {
-					"summary": "List users",
-					"description": "Get all users",
-					"responses": {
-						"200": {
-							"description": "Successful response",
-							"content": {
-								"application/json": {
-									"schema": {
-										"type": "array",
-										"items": {
-											"type": "object",
-											"properties": {
-												"id": {
-													"type": "string"
-												},
-												"name": {
-													"type": "string"
-												}
+	"openapi": "3.0.0",
+	"info": {
+		"title": "Test API",
+		"version": "1.0.0"
+	},
+	"paths": {
+		"/users": {
+			"get": {
+				"summary": "List users",
+				"description": "Get all users",
+				"responses": {
+					"200": {
+						"description": "Successful response",
+						"content": {
+							"application/json": {
+								"schema": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"id": {
+												"type": "string"
+											},
+											"name": {
+												"type": "string"
 											}
 										}
 									}
@@ -273,99 +272,123 @@ func TestSwaggerParser_ProcessOperations(t *testing.T) {
 							}
 						}
 					}
-				},
-				"post": {
-					"summary": "Create user",
-					"description": "Create a new user",
-					"requestBody": {
-						"required": true,
-						"content": {
-							"application/json": {
-								"schema": {
-									"type": "object",
-									"properties": {
-										"name": {
-											"type": "string",
-											"description": "User name"
-										},
-										"email": {
-											"type": "string",
-											"description": "User email",
-											"format": "email"
-										}
+				}
+			},
+			"post": {
+				"summary": "Create user",
+				"description": "Create a new user",
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"properties": {
+									"name": {
+										"type": "string",
+										"description": "User name"
 									},
-									"required": ["name", "email"]
-								}
+									"email": {
+										"type": "string",
+										"description": "User email",
+										"format": "email"
+									}
+								},
+								"required": [
+									"name",
+									"email"
+								]
 							}
 						}
 					}
+				},
+				"responses": {
+					"201": {
+						"description": "Created"
+					}
+				}
+			}
+		},
+		"/users/{id}": {
+			"get": {
+				"summary": "Get user",
+				"description": "Get user by ID",
+				"parameters": [
+					{
+						"name": "id",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "OK"
+					}
 				}
 			},
-			"/users/{id}": {
-				"get": {
-					"summary": "Get user",
-					"description": "Get user by ID",
-					"parameters": [
-						{
-							"name": "id",
-							"in": "path",
-							"required": true,
-							"schema": {
-								"type": "string"
-							}
-						}
-					]
-				},
-				"put": {
-					"summary": "Update user",
-					"description": "Update an existing user",
-					"parameters": [
-						{
-							"name": "id",
-							"in": "path",
-							"required": true,
-							"schema": {
-								"type": "string"
-							}
-						}
-					],
-					"requestBody": {
+			"put": {
+				"summary": "Update user",
+				"description": "Update an existing user",
+				"parameters": [
+					{
+						"name": "id",
+						"in": "path",
 						"required": true,
-						"content": {
-							"application/json": {
-								"schema": {
-									"type": "object",
-									"properties": {
-										"name": {
-											"type": "string"
-										},
-										"email": {
-											"type": "string",
-											"format": "email"
-										}
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"properties": {
+									"name": {
+										"type": "string"
+									},
+									"email": {
+										"type": "string",
+										"format": "email"
 									}
 								}
 							}
 						}
 					}
 				},
-				"delete": {
-					"summary": "Delete user",
-					"description": "Delete a user",
-					"parameters": [
-						{
-							"name": "id",
-							"in": "path",
-							"required": true,
-							"schema": {
-								"type": "string"
-							}
+				"responses": {
+					"200": {
+						"description": "OK"
+					}
+				}
+			},
+			"delete": {
+				"summary": "Delete user",
+				"description": "Delete a user",
+				"parameters": [
+					{
+						"name": "id",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "string"
 						}
-					]
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "OK"
+					}
 				}
 			}
 		}
-	}`)
+	}
+}`)
 
 	adjuster := NewAdjuster()
 	parser := NewSwaggerParser(adjuster)
@@ -594,44 +617,49 @@ func TestParseOpenAPISpecs(t *testing.T) {
 		{
 			name: "Valid OpenAPI 3.0 spec",
 			input: `{
-				"openapi": "3.0.0",
-				"info": {
-					"title": "Test API",
-					"version": "1.0.0"
-				},
-				"paths": {
-					"/users/{id}": {
-						"post": {
-							"summary": "Create user",
-							"parameters": [
-								{
-									"name": "id",
-									"in": "path",
-									"required": true,
-									"schema": {
-										"type": "string"
-									}
-								}
-							],
-							"requestBody": {
-								"required": true,
-								"content": {
-									"application/json": {
-										"schema": {
-											"type": "object",
-											"properties": {
-												"name": {
-													"type": "string"
-												}
-											}
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			}`,
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Test API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/users/{id}": {
+      "post": {
+        "summary": "Create user",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    }
+  }
+}`,
 			wantErr: false,
 			validate: func(t *testing.T, p *SwaggerParser) {
 				tools := p.GetRouteTools()
@@ -765,87 +793,102 @@ func TestParseOpenAPISpecs(t *testing.T) {
 func TestParseComplexSpecs(t *testing.T) {
 	// Test with a more complex OpenAPI 3.0 spec
 	complexSpec := `{
-		"openapi": "3.0.0",
-		"info": {
-			"title": "Complex API",
-			"version": "1.0.0"
-		},
-		"paths": {
-			"/users": {
-				"get": {
-					"summary": "List users",
-					"parameters": [
-						{
-							"name": "page",
-							"in": "query",
-							"schema": {
-								"type": "integer"
-							}
-						},
-						{
-							"name": "limit",
-							"in": "query",
-							"schema": {
-								"type": "integer"
-							}
-						}
-					]
-				},
-				"post": {
-					"summary": "Create user",
-					"requestBody": {
-						"required": true,
-						"content": {
-							"application/json": {
-								"schema": {
-									"type": "object",
-									"properties": {
-										"name": {
-											"type": "string"
-										},
-										"email": {
-											"type": "string"
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			},
-			"/users/{id}/files": {
-				"post": {
-					"summary": "Upload user file",
-					"parameters": [
-						{
-							"name": "id",
-							"in": "path",
-							"required": true,
-							"schema": {
-								"type": "string"
-							}
-						}
-					],
-					"requestBody": {
-						"required": true,
-						"content": {
-							"multipart/form-data": {
-								"schema": {
-									"type": "object",
-									"properties": {
-										"file": {
-											"type": "string",
-											"format": "binary"
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}`
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Complex API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/users": {
+      "get": {
+        "summary": "List users",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create user",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "email": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/users/{id}/files": {
+      "post": {
+        "summary": "Upload user file",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    }
+  }
+}`
 
 	t.Run("Complex OpenAPI 3.0 spec", func(t *testing.T) {
 		adjuster := NewAdjuster()
@@ -903,34 +946,54 @@ func TestParseComplexSpecs(t *testing.T) {
 func TestSwaggerParserWithAdjustments(t *testing.T) {
 	// Create a test OpenAPI spec with multiple endpoints
 	openapiSpec := []byte(`{
-		"openapi": "3.0.0",
-		"info": {
-			"title": "Test API",
-			"version": "1.0.0"
-		},
-		"paths": {
-			"/users": {
-				"get": {
-					"summary": "List users",
-					"description": "Get all users"
-				},
-				"post": {
-					"summary": "Create user",
-					"description": "Create a new user"
-				}
-			},
-			"/orders": {
-				"get": {
-					"summary": "List orders",
-					"description": "Get all orders"
-				},
-				"post": {
-					"summary": "Create order",
-					"description": "Create a new order"
-				}
-			}
-		}
-	}`)
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Test API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/users": {
+      "get": {
+        "summary": "List users",
+        "description": "Get all users",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create user",
+        "description": "Create a new user",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/orders": {
+      "get": {
+        "summary": "List orders",
+        "description": "Get all orders",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create order",
+        "description": "Create a new order",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    }
+  }
+}`)
 
 	t.Run("With route filtering", func(t *testing.T) {
 		// Create adjuster that only allows specific routes

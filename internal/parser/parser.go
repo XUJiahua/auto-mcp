@@ -2,6 +2,7 @@ package parser
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -533,19 +534,25 @@ func extractPathParams(path string) []string {
 	return params
 }
 
-// normalizeSpecData re-encodes the document with 3.1-only spellings rewritten.
+// validateConformance refuses a document that does not conform to OpenAPI.
 //
-// The already-decoded probe is reused rather than parsed again, so this costs one
-// walk and one encode regardless of how the document arrived.
-func normalizeSpecData(original []byte, decoded map[string]interface{}) ([]byte, error) {
-	normalized, err := json.Marshal(normalizeOpenAPI31(decoded))
-	if err != nil {
-		return nil, fmt.Errorf("failed to normalise OpenAPI document: %w", err)
+// Only conformant documents are in scope, and the alternative to refusing is
+// worse than it looks: a non-conformant construct usually does not fail loudly,
+// it just goes unread. One real document declared types with a `types` key —
+// a field of swagger-core's Java model rather than an OpenAPI keyword — for 220
+// of its 854 properties, so loading it published a quarter of the API with no
+// types at all, and nothing said so.
+//
+// Pattern validation is disabled because it does not test conformance. OpenAPI
+// mandates ECMA-262 regular expressions, which permit lookahead, and Go's RE2
+// does not implement it. A specification using lookahead is correct; refusing it
+// would reject a valid document for a limitation of this implementation. Both
+// real specifications measured use exactly that construct.
+func validateConformance(doc *openapi3.T) error {
+	if err := doc.Validate(context.Background(), openapi3.DisableSchemaPatternValidation()); err != nil {
+		return fmt.Errorf("OpenAPI document does not conform to the specification: %w", err)
 	}
-	if len(normalized) == 0 {
-		return original, nil
-	}
-	return normalized, nil
+	return nil
 }
 
 // probeSpecDocument decodes the spec far enough to read its version fields.
@@ -607,16 +614,10 @@ func (p *SwaggerParser) detectAndParseOpenAPI(data []byte) error {
 		}
 	}
 
-	// 3.1 spellings are rewritten before the loader sees them; see openapi31.go.
-	normalized, err := normalizeSpecData(data, jsonObj)
-	if err != nil {
-		return err
-	}
-
 	loader := openapi3.NewLoader()
-	doc, err := loader.LoadFromData(normalized)
+	doc, err := loader.LoadFromData(data)
 	if err != nil {
-		logger.Error("Failed to parse OpenAPI 3.0 spec", zap.Error(err))
+		logger.Error("Failed to parse OpenAPI spec", zap.Error(err))
 		return fmt.Errorf("failed to parse OpenAPI spec: %w", err)
 	}
 
@@ -624,7 +625,11 @@ func (p *SwaggerParser) detectAndParseOpenAPI(data []byte) error {
 		return fmt.Errorf("failed to parse OpenAPI spec: document is empty")
 	}
 
-	logger.Info("Successfully parsed OpenAPI 3.0 spec")
+	if err := validateConformance(doc); err != nil {
+		return err
+	}
+
+	logger.Info("Successfully parsed OpenAPI spec", zap.String("version", doc.OpenAPI))
 	p.doc = doc
 	return nil
 }

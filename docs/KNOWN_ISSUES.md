@@ -354,8 +354,9 @@ Visa Intelligent Commerce 425 KiB/23),**三份全是 OpenAPI 3.1.0**,立刻撞�
 
 **(c) 非标准的 `types` 复数键。** Visa 那份用 `"types": ["string"]` 而非 `"type"`,并带着
 `exampleSetFlag` —— 这是 swagger-core 的 **Java 模型对象被直接序列化**的产物,不是 OpenAPI。
-**854 个属性里 220 个这样声明类型**,合规解析器读起来是四分之一的文档没有类型。现在改写为
-`type` 并**告警报出数量**,让文档去源头修,而不是永久被将就。
+**854 个属性里 220 个这样声明类型**,合规解析器读起来是四分之一的文档没有类型。
+最初的做法是改写 + 告警;**现在改为拒绝加载**(见 #16):只处理合规文档,
+改写等于永久将就一份坏文档。
 
 **(d) 缺 `type` 时兜底成 `object` 是在说假话。** 文档没说类型意味着"任何类型",而把它窄化成
 最不可能的那一种,会让信任 schema 的调用方在该送字符串的位置送对象。现在只在有结构证据时
@@ -417,3 +418,29 @@ kin-openapi v0.147 明确声明支持 **OpenAPI 3.0 / 3.1 / 3.2**(v0.132 只有 
 升级后三份真 spec 复验,下游结果与升级前一致(visa 仍是 257 flag / 0 个 object 型)。
 顺带修了升级带来的 6 处 lint:`openapi3.Uint64Ptr` / `Float64Ptr` / `BoolPtr` 均已废弃,
 改用泛型 `openapi3.Ptr`。
+
+## 16. 只处理合规的 OpenAPI 文档
+
+定下的范围:**auto-mcp 只处理符合规范的 OpenAPI 文档。** 于是 #14(c) 里那段为
+`types` 复数键做的改写被删除,`internal/parser/openapi31.go` 整个文件不再需要
+(3.1 的部分已由 kin-openapi v0.147 承担,见 #15;剩下的只有这一处将就)。
+
+取而代之的是**启动时真正校验合规性**:`doc.Validate(ctx, DisableSchemaPatternValidation())`。
+
+为什么是校验而不是"什么都不做":一个非合规构造通常**不会响亮地失败,它只是没被读到**。
+Visa 那份如果照旧加载,四分之一的 API 会以"没有类型"的样子发布出去,而没有任何地方说这件事。
+拒绝加载并报出原因,是"超出处理范围"唯一诚实的表达。
+
+**为什么关掉 pattern 校验:那一项不检验合规性。** OpenAPI 规定用 ECMA-262 正则,它支持
+lookahead;Go 的 RE2 不支持。一份用了 lookahead 的文档是**正确的**,拒绝它等于用本实现的
+限制去否定一份合法文档 —— 而实测的两份真实 spec 都在用这个构造。区分开之后判定精确:
+
+```
+agenzo   ACCEPT  87 tools     ← 用了 lookahead 正则,合规
+ledger   ACCEPT  12 tools
+visa     REJECT  invalid components: schema "Address": extra sibling fields: [exampleSetFlag types]
+```
+
+**代价:本仓自己的测试夹具有 4 处不合规**(`/users/{id}` 的 GET/PUT/DELETE 与 `/users` 的 POST
+都缺 `responses`,而它是必填项),校验一开就红了。已补齐 —— 这本身就是这项校验的第一份
+收益:它先抓到的是我们自己。

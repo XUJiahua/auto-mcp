@@ -98,6 +98,27 @@ This approach keeps all related files together and is ideal for local developmen
 
 ---
 
+## ✅ Documents must conform
+
+A document is validated against the OpenAPI specification at startup and refused
+if it does not conform, with the reason:
+
+```
+OpenAPI document does not conform to the specification: invalid components:
+schema "Address": extra sibling fields: [exampleSetFlag types]
+```
+
+Refusing is the point. A non-conformant construct rarely fails loudly — it simply
+goes unread. One real 425 KiB document declared types with a `types` key, which
+belongs to swagger-core's Java model rather than to OpenAPI, for 220 of its 854
+properties; loading it would publish a quarter of that API with no types at all
+and say nothing about it.
+
+Pattern validation is not part of this check. OpenAPI mandates ECMA-262 regular
+expressions, which permit lookahead, and Go's regexp engine does not implement it.
+A specification using lookahead is correct, so refusing it would reject a valid
+document over a limitation of this implementation.
+
 ## 🗂️ Serving several APIs from one process
 
 One `swagger_file` at the top level is the single-service form: its endpoint stays
