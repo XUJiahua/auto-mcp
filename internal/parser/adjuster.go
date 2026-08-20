@@ -1,6 +1,8 @@
 package parser
 
 import (
+	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -23,6 +25,24 @@ func NewAdjuster() *Adjuster {
 			Routes:       []models.RouteSelection{},
 		},
 	}
+}
+
+// LoadReader loads adjustments from an already-open document.
+//
+// An embedding host may keep the curation alongside the specification it belongs
+// to — in a database row, say — and should not have to write it to a temporary
+// file to use it.
+func (a *Adjuster) LoadReader(reader io.Reader) error {
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return fmt.Errorf("reading adjustments: %w", err)
+	}
+	var adjustments models.MCPAdjustments
+	if err := yaml.Unmarshal(data, &adjustments); err != nil {
+		return fmt.Errorf("parsing adjustments: %w", err)
+	}
+	a.adjustments = &adjustments
+	return nil
 }
 
 // Load loads adjustments from a YAML file
@@ -66,7 +86,12 @@ func (a *Adjuster) ExistsInMCP(route, method string) bool {
 		if selection.Path == route {
 			// Check if the method is in the list of selected methods
 			for _, m := range selection.Methods {
-				if m == method {
+				// Case-insensitive: OpenAPI spells its path-item keys in lower
+				// case and the bundled TUI writes them upper case. A mismatch used
+				// to mean the route quietly did not exist, and a filter that
+				// silently selects nothing looks exactly like a document that has
+				// no routes.
+				if strings.EqualFold(m, method) {
 					return true
 				}
 			}
@@ -88,7 +113,7 @@ func (a *Adjuster) GetDescription(route, method, originalDesc string) string {
 		if desc.Path == route {
 			// Look through all updates for this route
 			for _, update := range desc.Updates {
-				if update.Method == method {
+				if strings.EqualFold(update.Method, method) {
 					return update.NewDescription
 				}
 			}

@@ -1,6 +1,8 @@
 package parser
 
 import (
+	"github.com/stretchr/testify/require"
+	"strings"
 	"testing"
 
 	"github.com/brizzai/auto-mcp/internal/models"
@@ -201,4 +203,33 @@ func TestAdjuster_GetDescription(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// The method is matched without regard to case. OpenAPI spells its own path-item
+// keys in lower case, the bundled TUI writes them in upper case, and a mismatch
+// used to mean the route quietly did not exist — a filter that silently selects
+// nothing is indistinguishable from a document with no routes.
+func TestAdjuster_MethodMatchingIgnoresCase(t *testing.T) {
+	for _, written := range []string{"get", "GET", "Get"} {
+		t.Run(written, func(t *testing.T) {
+			a := NewAdjuster()
+			require.NoError(t, a.LoadReader(strings.NewReader(
+				"routes:\n  - path: /pet\n    methods: ["+written+"]\n"+
+					"descriptions:\n  - path: /pet\n    updates:\n      - method: "+written+
+					"\n        new_description: curated\n")))
+
+			assert.True(t, a.ExistsInMCP("/pet", "GET"), "route selection must match")
+			assert.Equal(t, "curated", a.GetDescription("/pet", "GET", "original"),
+				"description override must match")
+		})
+	}
+}
+
+// A method that was not selected is still excluded.
+func TestAdjuster_UnselectedMethodStaysExcluded(t *testing.T) {
+	a := NewAdjuster()
+	require.NoError(t, a.LoadReader(strings.NewReader("routes:\n  - path: /pet\n    methods: [get]\n")))
+
+	assert.True(t, a.ExistsInMCP("/pet", "GET"))
+	assert.False(t, a.ExistsInMCP("/pet", "POST"))
 }

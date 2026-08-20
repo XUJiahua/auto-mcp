@@ -444,3 +444,69 @@ visa     REJECT  invalid components: schema "Address": extra sibling fields: [ex
 **代价:本仓自己的测试夹具有 4 处不合规**(`/users/{id}` 的 GET/PUT/DELETE 与 `/users` 的 POST
 都缺 `responses`,而它是必填项),校验一开就红了。已补齐 —— 这本身就是这项校验的第一份
 收益:它先抓到的是我们自己。
+
+## 17. 作为共享库嵌入
+
+需求:merchant-hub 后端在**进程内**用 auto-mcp 暴露能力,前端引导用户上传 OpenAPI
+文档,录入成功即成为 MCP 服务。三个已定的选择:进程内 MCP 一跳、spec 存 SQLite 经
+`ParseReader` 读入、库化改造独立成一个 PR。
+
+**做法与最初的分析不同。** 我先前建议"把 parser 等 6 个包从 `internal/` 提出来",那是错的:
+
+- 会把 `internal/config`(装着 viper、`ServerConfig`、`OAuthConfig`)变成宿主的编译期依赖;
+- 会把 `internal/logger` 的**全局单例**变成两个应用共享的可变全局;
+- 会导出约 50 个符号,而宿主实际需要 5 个 —— 之后每次内部重构都是宿主的破坏性变更。
+
+改为**一个门面包 `automcp`**,`internal/*` 一个都不外露。对外只有:
+
+```go
+type Options struct { Spec, Adjustment io.Reader; BaseURL string; Headers map[string]string; Timeout time.Duration }
+type Service struct{ ... }
+type Tool    struct{ Tool *mcp.Tool; Handler mcp.ToolHandler }
+func Build(Options) (*Service, error)
+func (*Service) Register(*mcp.Server); Tools() []Tool; SchemaBytes() int
+```
+
+分工:**文档来源、`mcp.Server` 的归属、对外服务方式、凭证解析,全归宿主。** 这个包只解析、
+构建、交出工具。`Headers` 是凭证的落点 —— 宿主解析后交过来,`automcp` 只负责携带,
+所以凭证只有一个家。
+
+`Build` 不发请求,可以只为**预览**而构建:`Tools()` 看工具面、`SchemaBytes()` 看体积、
+不合规直接返回错误。上传界面需要的正是这个。
+
+**两边共用同一个 MCP SDK(`go-sdk v1.7.0`)是这件事可行的前提**,而那是 #15 换库的副产品:
+在 mark3labs 时代两边的 `mcp.Tool` 是不同类型,共享得写一整层转换。
+
+实测(在 merchant-hub 里 import,**它的现有代码一行未改**):
+
+```
+① Build:        tools=1  schema=412B
+② introspect:   server="merchant-hub/hotel" tools=1     ← 经它自己的 gateway
+③ derive:       verb=query-hotel-info read=true
+                flags=[hotel-id[string,path=body.businessRequest.hotelId,ex="H12345"]]
+④ 上游实收:     {"businessRequest":{"hotelId":"H12345"},
+                 "header":{"partnerCode":"P0001","sign":"C99C0AAC…"}}
+```
+
+第 ④ 步要紧:签名字段仍由 **merchant-hub 的凭证引擎**注入到 `body.header`,穿过
+in-process 的 auto-mcp 原样落到上游。九个元工具、derive、exec、Agent 探索、门禁全部不用改,
+因为它们看到的仍然是一个 MCP server。
+
+### 建这一层时撞出的两个缺陷(已修)
+
+- **校订文件的方法名比较是大小写敏感的。** `ExistsInMCP` 与 `GetDescription` 用 `==`
+  比较方法名,而 parser 传的是 `"GET"`。官方示例写 `POST` 能用,而 OpenAPI 自己的
+  path-item 键是小写 —— **写 `methods: [get]` 会静默产出零个工具**,一个什么都选不中的
+  过滤器和一份没有路由的文档无法区分。我自己刚写的 USAGE.md 里就是小写。三处比较统一
+  改为 `strings.EqualFold`(其中响应模板那处本来就是,同一个文件里两种行为)。
+- **工具顺序不确定。** `processOperations` 直接遍历 paths 的 map,每次运行发布的顺序都不同。
+  对正确性无影响,但抓下来的 `tools/list` 无法 diff,按位置寻址的消费方也会看到工具移位。
+  现在按路径排序后遍历。
+
+### 仍待处理
+
+- merchant-hub 侧的接入:录入向导第一步加"来源"分叉(已有 MCP 地址 / OpenAPI 文档),
+  而不是新开板块 —— 后三步(预览、校订、发布、探索)两种来源完全相同。
+- `HUB_ENVIRONMENT=production` 拒绝一切探索这条不变量要覆盖新来源。
+- 凭证轮换目前需要重建 service(`Headers` 在 Build 时固定)。需要热轮换时,
+  给 `Options` 加一个按调用取头的钩子。

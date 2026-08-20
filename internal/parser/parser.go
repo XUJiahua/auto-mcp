@@ -693,7 +693,20 @@ func (p *SwaggerParser) ParseReader(reader io.Reader) error {
 // processOperations iterates through paths and operations in the spec
 func (p *SwaggerParser) processOperations() error {
 	p.usedToolNames = map[string]bool{}
-	for path, pathItem := range p.doc.Paths.Map() {
+
+	// The document's paths live in a map, so walking it directly published a
+	// different tool order on every run. Nothing depends on the order for
+	// correctness, but an unstable one makes a captured tools/list impossible to
+	// diff and moves tools under any consumer that addresses them positionally.
+	paths := p.doc.Paths.Map()
+	ordered := make([]string, 0, len(paths))
+	for path := range paths {
+		ordered = append(ordered, path)
+	}
+	sort.Strings(ordered)
+
+	for _, path := range ordered {
+		pathItem := paths[path]
 		httpMethods := []struct {
 			Method    string
 			Operation *openapi3.Operation

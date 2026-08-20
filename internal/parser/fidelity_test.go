@@ -558,3 +558,32 @@ func TestFidelity_CollidingParameterNamesAreDisambiguated(t *testing.T) {
 	assert.Equal(t, "body", byName["query_body"].Name)
 	assert.Equal(t, requester.ParamInQuery, byName["query_body"].In)
 }
+
+// Tool order is stable across runs. The document's paths live in a map, so
+// iterating it published a different order every time: diffs of a captured
+// tools/list became noise, and any consumer that addresses tools positionally saw
+// them move.
+func TestFidelity_ToolOrderIsDeterministic(t *testing.T) {
+	const spec = `{
+      "openapi": "3.0.1", "info": {"title": "Many", "version": "1.0"},
+      "paths": {
+        "/c": {"get": {"operationId": "getC", "responses": {"200": {"description": "OK"}}}},
+        "/a": {"get": {"operationId": "getA", "responses": {"200": {"description": "OK"}}},
+               "post": {"operationId": "postA", "responses": {"200": {"description": "OK"}}}},
+        "/b": {"get": {"operationId": "getB", "responses": {"200": {"description": "OK"}}}}}}`
+
+	var first []string
+	for run := 0; run < 8; run++ {
+		names := []string{}
+		for _, rt := range parseSpec(t, spec).GetRouteTools() {
+			names = append(names, rt.Tool.Name)
+		}
+		if run == 0 {
+			first = names
+			continue
+		}
+		assert.Equal(t, first, names, "run %d produced a different order", run)
+	}
+	assert.Equal(t, []string{"getA", "postA", "getB", "getC"}, first,
+		"ordered by path, then by the method order the parser walks")
+}
