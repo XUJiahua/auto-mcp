@@ -10,6 +10,7 @@ import (
 	"net/http"
 	urlpkg "net/url"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,7 +60,10 @@ func (b *HTTPRequestBuilder) BuildRequest(ctx context.Context, params map[string
 	byLocation := b.paramsByLocation()
 
 	// Build URL, consuming the path parameters.
-	url, consumed := b.buildURL(b.routeConfig.Path, params, byLocation)
+	url, consumed, err := b.buildURL(b.routeConfig.Path, params, byLocation)
+	if err != nil {
+		return nil, err
+	}
 	url = b.addQueryParams(url, params, byLocation, consumed)
 
 	// Create request body
@@ -151,7 +155,7 @@ func (b *HTTPRequestBuilder) paramsByLocation() map[ParamLocation][]ParamConfig 
 // buildURL substitutes path placeholders and reports which arguments it used, so
 // they are not repeated in the query string.
 func (b *HTTPRequestBuilder) buildURL(path string, params map[string]interface{},
-	byLocation map[ParamLocation][]ParamConfig) (string, map[string]bool) {
+	byLocation map[ParamLocation][]ParamConfig) (string, map[string]bool, error) {
 
 	consumed := map[string]bool{}
 	url := b.serviceCfg.BaseURL + path
@@ -177,7 +181,28 @@ func (b *HTTPRequestBuilder) buildURL(path string, params map[string]interface{}
 	for name := range params {
 		substitute(name, name)
 	}
-	return url, consumed
+
+	// A placeholder that survived was not supplied. Sending it would percent-encode
+	// the braces into the path, and the upstream would answer with a routing error
+	// about a URL nobody meant to request. The value is what makes the URL
+	// addressable, so its absence is reported here where the name is known.
+	if missing := pathPlaceholders(url); len(missing) > 0 {
+		return "", nil, fmt.Errorf("missing required path parameter(s): %s",
+			strings.Join(missing, ", "))
+	}
+	return url, consumed, nil
+}
+
+// pathPlaceholderPattern matches an unsubstituted {name} in a path.
+var pathPlaceholderPattern = regexp.MustCompile(`\{([^{}/]+)\}`)
+
+func pathPlaceholders(url string) []string {
+	matches := pathPlaceholderPattern.FindAllStringSubmatch(url, -1)
+	names := make([]string, 0, len(matches))
+	for _, match := range matches {
+		names = append(names, match[1])
+	}
+	return names
 }
 
 // addQueryParams appends query parameters for every method, not just GET: a

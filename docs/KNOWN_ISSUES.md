@@ -332,3 +332,60 @@ Registered service {"route": "/mcp", "tools": 20, "schema_bytes": 5517,
 
 顺带把 `NewServer` 拆成了 `New(cfg) (*Server, error)` 与包一层 `logger.Fatal` 的
 `NewServer` —— 一个会杀掉进程的构造函数没法测失败路径。
+
+## 14. 真实 spec 暴露的四个问题 —— 已解决
+
+前面所有验证用的都是手写夹具与 petstore。拿三份真实 spec 跑全链路
+(agenzo-platform 229 KiB/87 operations、ledger-service 74 KiB/12、
+Visa Intelligent Commerce 425 KiB/23),**三份全是 OpenAPI 3.1.0**,立刻撞出四个问题。
+
+**(a) 3.1 的数值型 `exclusiveMinimum` 让整份文档加载失败。** 3.1 采用 JSON Schema 2020-12,
+该关键字从"布尔标志"变成"边界本身";kin-openapi 建模的是 3.0,于是 unmarshal 直接失败。
+**agenzo 里 3 处、ledger 里 1 处,就让这两份文档完全加载不了。** 现在在交给 loader 之前
+改写成 3.0 等价形式(`internal/parser/openapi31.go`),输出侧再写回 2020-12 形式
+——SDK 说明它发布的 schema 按 2020-12 读。
+
+**(b) `anyOf: [T, null]` 掉进 `type: object` 兜底。** 3.1 没有 `nullable`,可选字段一律写成
+与 null 的联合 —— 两份 FastAPI 生成的文档里共 **156 处**(对比真正的联合只有 3 处)。
+原来会被当成组合关键字处理,而剩下那一支才是字段的真实类型,于是一个字符串字段被告知
+"送一个对象"。现在先丢掉 null 分支:只剩一支就是字段本身(直接合并、不发组合关键字、
+不加描述噪声),剩多支才是真联合。
+
+**(c) 非标准的 `types` 复数键。** Visa 那份用 `"types": ["string"]` 而非 `"type"`,并带着
+`exampleSetFlag` —— 这是 swagger-core 的 **Java 模型对象被直接序列化**的产物,不是 OpenAPI。
+**854 个属性里 220 个这样声明类型**,合规解析器读起来是四分之一的文档没有类型。现在改写为
+`type` 并**告警报出数量**,让文档去源头修,而不是永久被将就。
+
+**(d) 缺 `type` 时兜底成 `object` 是在说假话。** 文档没说类型意味着"任何类型",而把它窄化成
+最不可能的那一种,会让信任 schema 的调用方在该送字符串的位置送对象。现在只在有结构证据时
+命名类型(有 `properties`/`additionalProperties` → object,有 `items` → array),否则不写。
+
+**(e) 未替换的 path 占位符被编码后发给上游。** 缺必填 path 参数时,`{account_id}` 被
+percent-encode 成 `%7Baccount_id%7D` 发出去,上游回一个关于"谁也没想请求的 URL"的路由错误。
+「没有它就构不出 URL」正是 path 参数恒为必填的原因,所以现在在本地拒绝并报出参数名。
+
+修完之后的实测:
+
+| spec | tools | verbs | read | flags | object 型 | 标量/数组 | 带 example |
+|---|---|---|---|---|---|---|---|
+| agenzo | 87 | 78(9 个 webhook 正确排除) | 33 | 390 | **3** | 387 | 54 |
+| ledger | 12 | 12 | 6 | 45 | **2** | 43 | 7 |
+| visa | 23 | 23 | 6 | 257 | **0** | 257 | 25 |
+
+visa 的 object 型 flag 从 **144 → 0**(即 (c) 修掉了四分之一文档的类型)。三份的真实调用也
+都打通(`/health`、`/v1/currencies` 都拿到了上游响应)。agenzo 的 9 个
+`/api/webhooks/v1/...` 被下游正确判为入向回调而排除 —— 启发式在真文档上是对的。
+
+**体积的真实量级**(这是之前 #4/#13 里说"没有实测"的那个数):
+
+```
+agenzo  87 个工具  52,525 B   最大 7,048 B
+ledger  12 个工具  10,406 B   最大 4,518 B
+visa    23 个工具 189,121 B   最大 35,776 B   ← compositeTransaction
+```
+
+单个工具 35.7 KiB 远超我从 petstore 外推的"1 KiB 上下"。`max_tool_schema_kib`(#13)在这种
+量级上不是洁癖而是必要的护栏。
+
+Visa 那 10 个缺 `operationId` 的 operation 回落成 `delete_vars_v1_agents_agentid_keys_keyid`
+这类名字 —— 可读性差但可用,且不与任何 operationId 冲突。

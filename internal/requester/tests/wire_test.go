@@ -252,3 +252,41 @@ func TestWire_RenamedPathParamSubstitutes(t *testing.T) {
 	assert.Equal(t, "/api/order/SO1", req.HttpRequest.URL.Path)
 	assert.JSONEq(t, `{"a":1}`, readAllBody(t, req))
 }
+
+// A path parameter that was not supplied leaves its placeholder in the URL, which
+// then reaches the upstream percent-encoded as %7Bname%7D. The upstream answers
+// with a routing error about a path nobody meant to request. Since the URL cannot
+// be built without the value — which is why path parameters are always required —
+// refusing locally is the only outcome that names the actual problem.
+func TestWire_MissingPathParamIsRefused(t *testing.T) {
+	builder := requester.NewHTTPRequestBuilder(requester.HTTPRequestBuilderParams{
+		EndpointConfig: &config.EndpointConfig{BaseURL: "http://api.example.com"},
+		AuthManager:    noopAuth(),
+		RouteConfig: &requester.RouteConfig{
+			Method: http.MethodGet,
+			Path:   "/v1/accounts/{account_id}/balance",
+			MethodConfig: requester.MethodConfig{Params: []requester.ParamConfig{
+				{Name: "account_id", In: requester.ParamInPath, Type: "string"},
+			}},
+		},
+	})
+
+	_, err := builder.BuildRequest(context.Background(), map[string]any{})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "account_id")
+}
+
+// An undeclared placeholder is refused for the same reason.
+func TestWire_UndeclaredPathPlaceholderIsAlsoRefused(t *testing.T) {
+	builder := requester.NewHTTPRequestBuilder(requester.HTTPRequestBuilderParams{
+		EndpointConfig: &config.EndpointConfig{BaseURL: "http://api.example.com"},
+		AuthManager:    noopAuth(),
+		RouteConfig:    &requester.RouteConfig{Method: http.MethodGet, Path: "/v1/things/{id}"},
+	})
+
+	_, err := builder.BuildRequest(context.Background(), map[string]any{})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "id")
+}

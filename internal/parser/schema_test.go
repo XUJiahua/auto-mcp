@@ -363,14 +363,20 @@ func TestJSONSchemaFor_OneOfIsDescribedAsExactlyOne(t *testing.T) {
 
 // A schema may carry both keywords. Each gets its own clause, and the
 // discriminator is named once rather than repeated per keyword.
+//
+// Two branches per keyword, because a single-branch composition is not a choice:
+// "must match exactly this one schema" is the schema, and it is merged rather
+// than described.
 func TestJSONSchemaFor_BothKeywordsGetSeparateClauses(t *testing.T) {
 	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
 		Discriminator: &openapi3.Discriminator{PropertyName: "kind"},
 		OneOf: openapi3.SchemaRefs{
 			branchSchema("card", []string{"cardNo"}, map[string]*openapi3.SchemaRef{"cardNo": str()}),
+			branchSchema("cash", []string{"cashRef"}, map[string]*openapi3.SchemaRef{"cashRef": str()}),
 		},
 		AnyOf: openapi3.SchemaRefs{
 			branchSchema("wallet", []string{"walletId"}, map[string]*openapi3.SchemaRef{"walletId": str()}),
+			branchSchema("points", []string{"points"}, map[string]*openapi3.SchemaRef{"points": str()}),
 		},
 	}})
 
@@ -384,7 +390,8 @@ func TestJSONSchemaFor_BothKeywordsGetSeparateClauses(t *testing.T) {
 	props := dig(t, got, "properties")
 	assert.Contains(t, props, "cardNo")
 	assert.Contains(t, props, "walletId")
-	assert.ElementsMatch(t, []any{"card", "wallet"}, dig(t, got, "properties", "kind")["enum"])
+	assert.ElementsMatch(t, []any{"card", "cash", "wallet", "points"},
+		dig(t, got, "properties", "kind")["enum"])
 }
 
 // branchList reads a composition keyword back as a list of schemas.

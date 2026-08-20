@@ -533,6 +533,21 @@ func extractPathParams(path string) []string {
 	return params
 }
 
+// normalizeSpecData re-encodes the document with 3.1-only spellings rewritten.
+//
+// The already-decoded probe is reused rather than parsed again, so this costs one
+// walk and one encode regardless of how the document arrived.
+func normalizeSpecData(original []byte, decoded map[string]interface{}) ([]byte, error) {
+	normalized, err := json.Marshal(normalizeOpenAPI31(decoded))
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalise OpenAPI document: %w", err)
+	}
+	if len(normalized) == 0 {
+		return original, nil
+	}
+	return normalized, nil
+}
+
 // probeSpecDocument decodes the spec far enough to read its version fields.
 //
 // A document that starts with '{' or '[' is decoded as JSON so that malformed
@@ -592,8 +607,14 @@ func (p *SwaggerParser) detectAndParseOpenAPI(data []byte) error {
 		}
 	}
 
+	// 3.1 spellings are rewritten before the loader sees them; see openapi31.go.
+	normalized, err := normalizeSpecData(data, jsonObj)
+	if err != nil {
+		return err
+	}
+
 	loader := openapi3.NewLoader()
-	doc, err := loader.LoadFromData(data)
+	doc, err := loader.LoadFromData(normalized)
 	if err != nil {
 		logger.Error("Failed to parse OpenAPI 3.0 spec", zap.Error(err))
 		return fmt.Errorf("failed to parse OpenAPI spec: %w", err)
