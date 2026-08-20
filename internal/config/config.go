@@ -45,6 +45,15 @@ type Config struct {
 	// matter of dropping in a directory rather than editing this file.
 	ServicesDir string `mapstructure:"services_dir"`
 
+	// MaxToolSchemaKiB refuses a tool whose inputSchema exceeds this size, in
+	// KiB. Zero means no limit.
+	//
+	// It is off by default because a large schema is a cost rather than a fault,
+	// and the number at which it becomes unacceptable belongs to the deployment.
+	// The sizes are reported at startup either way, so the cost is visible
+	// without having to pick a threshold.
+	MaxToolSchemaKiB int `mapstructure:"max_tool_schema_kib"`
+
 	// discovered holds the last scan of ServicesDir. It is refreshed by
 	// Rediscover so that a reload is one observable step rather than a scan
 	// hidden inside a getter.

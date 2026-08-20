@@ -130,6 +130,11 @@ fx 的图随之简化:`parser.Module` 与 `requester.Module` 删除,`Server` 自
   (手头没有真实商户 spec)。真实 spec 上体积成问题时,退一步是只发合并 + 把分支归属
   写进各字段的 description。
 
+这条未知现在**看得见**了:每个 service 注册时会报告 schema 总字节与最大的那个工具
+(见 #13),并可配 `max_tool_schema_kib` 上限。真实 petstore(20 个工具)的实测参照是
+总计 5517 字节、最大 `addPet` 610 字节 —— 即使某个工具因组合关键字翻倍,量级也在 1 KiB
+上下。真正的风险仍在深层嵌套多态,而现在它会在启动日志里显形而不是变成线上的 token 账单。
+
 ## 5. spec 注册 / 热加载 —— 已解决
 
 两部分。
@@ -301,3 +306,29 @@ responses:
 higress 的 `requestTemplate`(URL/Header/Body 模板 + `argsToJsonBody` 等开关)**没有实现**。
 它解决的是"上游要的 body 形状与工具参数不是 1:1",而 auto-mcp 从 OpenAPI 直接推导时这种
 错配不出现;真需要时再补。
+
+## 13. schema 体积不可见 —— 已解决
+
+`tools/list` 每次都把 `inputSchema` 送进模型上下文,所以它的体积是**持续成本**而不是一次性
+开销。而 #4 选了「两者都发」之后又多了 81%,却没有任何地方能看到实际数字。
+
+现在每个 service 注册时报告:
+
+```
+Registered service {"route": "/mcp", "tools": 20, "schema_bytes": 5517,
+                    "largest_tool": "addPet", "largest_tool_bytes": 610}
+```
+
+外加可配的 `max_tool_schema_kib`(0 = 不限,默认)。**默认不限**是刻意的:schema 大是成本
+而不是错误,多大算不可接受属于部署而不属于这里挑的一个数字。报告与阈值分开,是为了让
+"看见成本"不必先选一个阈值。
+
+上限在构建工具时检查,所以病态文档在**启动**时被拒而不是在首次调用时;又因为重载是
+"全部构建完再整体换入",一份长过上限的 spec 不会把正在服务的进程搞下线。
+
+借自 higress 的 `maxToolInputSchemaBytes`(它用 `1 << 20` 并且**硬拒**)。差别在于 higress
+是有界词汇表 + 硬上限以便运行时自己做入参校验;auto-mcp 不做入参校验(官方 SDK 的
+`Server.AddTool` 明确 opt-out),所以这里只需要可见性,硬上限交给部署自己开。
+
+顺带把 `NewServer` 拆成了 `New(cfg) (*Server, error)` 与包一层 `logger.Fatal` 的
+`NewServer` —— 一个会杀掉进程的构造函数没法测失败路径。

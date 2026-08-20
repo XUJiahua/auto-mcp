@@ -209,6 +209,34 @@ A reload that cannot be completed changes nothing: every service is rebuilt
 before any of them is swapped in, so a spec that stopped parsing leaves a process
 that was serving correctly still serving. The failure is logged.
 
+### Knowing what the schemas cost
+
+A tool's `inputSchema` travels to the client on every `tools/list` and lands in a
+model's context, so its size is a running cost. It is reported as each service is
+registered:
+
+```
+Registered service {"route": "/mcp", "tools": 20, "schema_bytes": 5517,
+                    "largest_tool": "addPet", "largest_tool_bytes": 610}
+```
+
+An optional limit refuses a tool whose schema is larger than a deployment is
+willing to carry:
+
+```yaml
+max_tool_schema_kib: 64 # 0, the default, means no limit
+```
+
+It is off by default because a large schema is a cost rather than a fault, and
+the point at which it becomes unacceptable belongs to the deployment rather than
+to a number chosen here. The sizes are reported either way, so the cost is
+visible without having to pick a threshold.
+
+The limit is checked while the tools are built, so a pathological document is
+refused at startup rather than at the first call — and since a reload builds
+everything before swapping anything in, a spec that grew past the limit cannot
+take down a process that is already serving.
+
 ## ✂️ Shaping upstream responses
 
 The adjustment file already selects routes and rewrites descriptions; it also

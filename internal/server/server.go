@@ -55,6 +55,8 @@ type Server struct {
 	// toolNames records what each service currently exposes, so a reload can
 	// remove exactly the tools that went away.
 	toolNames map[string][]string
+	// schemaSizes records what each service publishes, for reporting.
+	schemaSizes map[string]SchemaSize
 
 	auth    *auth.Service
 	handler *handler.Handler
@@ -64,27 +66,42 @@ type Server struct {
 // NewServer creates a new MCP server instance with the provided configuration.
 // It initializes the server with the given parser and requester, and sets up
 // authentication if enabled in the configuration.
+// NewServer creates the server, failing the process if it cannot be built.
+//
+// It is the entry point for the dependency graph, which has no way to handle an
+// error. New is the same thing with the error returned, which is what makes the
+// failure paths testable.
 func NewServer(cfg *config.Config) *Server {
+	srv, err := New(cfg)
+	if err != nil {
+		logger.Fatal("Failed to create server", zap.Error(err))
+	}
+	return srv
+}
+
+// New creates the server from a configuration.
+func New(cfg *config.Config) (*Server, error) {
 	if cfg == nil {
-		logger.Fatal("Config cannot be nil")
+		return nil, fmt.Errorf("config cannot be nil")
 	}
 
 	srv := &Server{
-		config:    cfg,
-		services:  map[string]*mcp.Server{},
-		toolNames: map[string][]string{},
+		config:      cfg,
+		services:    map[string]*mcp.Server{},
+		toolNames:   map[string][]string{},
+		schemaSizes: map[string]SchemaSize{},
 	}
 
 	if cfg.OAuth != nil && cfg.OAuth.Enabled {
 		if err := srv.setupAuth(); err != nil {
-			logger.Fatal("Failed to setup authentication", zap.Error(err))
+			return nil, fmt.Errorf("failed to setup authentication: %w", err)
 		}
 	}
 
 	srv.tool = tool.NewHandler(srv.auth != nil)
 
 	if err := srv.setupTools(); err != nil {
-		logger.Fatal("Failed to setup tools", zap.Error(err))
+		return nil, err
 	}
 
 	// The HTTP handler routes on the service names, so it can only be built once
@@ -92,7 +109,7 @@ func NewServer(cfg *config.Config) *Server {
 	srv.handler = handler.NewHandler(srv.auth, security.New(cfg.SecuritySchemes),
 		cfg.DownstreamSecurity, srv.ServiceNames())
 
-	return srv
+	return srv, nil
 }
 
 func (s *Server) setupAuth() error {
@@ -157,6 +174,7 @@ func (s *Server) apply(services []config.ServiceConfig) error {
 	type built struct {
 		service config.ServiceConfig
 		tools   []*registeredTool
+		size    SchemaSize
 	}
 	prepared := make([]built, 0, len(services))
 	for _, service := range services {
@@ -164,7 +182,11 @@ func (s *Server) apply(services []config.ServiceConfig) error {
 		if err != nil {
 			return err
 		}
-		prepared = append(prepared, built{service: service, tools: tools})
+		size, err := measureSchemas(service.Name, tools, s.config.MaxToolSchemaKiB)
+		if err != nil {
+			return err
+		}
+		prepared = append(prepared, built{service: service, tools: tools, size: size})
 	}
 
 	s.mu.Lock()
@@ -198,17 +220,21 @@ func (s *Server) apply(services []config.ServiceConfig) error {
 			names = append(names, registered.tool.Name)
 		}
 		s.toolNames[name] = names
+		s.schemaSizes[name] = entry.size
 
+		action := "Registered service"
 		if existing {
-			logger.Info("Updated service",
-				zap.String("route", entry.service.RoutePath()),
-				zap.Int("tools", len(names)))
-		} else {
-			logger.Info("Registered service",
-				zap.String("route", entry.service.RoutePath()),
-				zap.String("spec", entry.service.SwaggerFile),
-				zap.Int("tools", len(names)))
+			action = "Updated service"
 		}
+		// The schema size is logged with the registration because it is a running
+		// cost: every tools/list carries it into a model's context.
+		logger.Info(action,
+			zap.String("route", entry.service.RoutePath()),
+			zap.String("spec", entry.service.SwaggerFile),
+			zap.Int("tools", len(names)),
+			zap.Int("schema_bytes", entry.size.TotalBytes),
+			zap.String("largest_tool", entry.size.LargestTool),
+			zap.Int("largest_tool_bytes", entry.size.LargestBytes))
 	}
 
 	for name := range s.services {
@@ -217,6 +243,7 @@ func (s *Server) apply(services []config.ServiceConfig) error {
 		}
 		delete(s.services, name)
 		delete(s.toolNames, name)
+		delete(s.schemaSizes, name)
 		if name == "" {
 			s.single = nil
 		}
