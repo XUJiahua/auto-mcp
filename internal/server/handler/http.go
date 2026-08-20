@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/brizzai/auto-mcp/internal/auth"
 	"github.com/brizzai/auto-mcp/internal/config"
@@ -19,7 +20,9 @@ type Handler struct {
 	security   *security.Engine
 	downstream *config.SecurityRequirement
 	// services is the set of route segments that exist. A single unnamed service
-	// is represented by the empty string and answers on any path.
+	// is represented by the empty string and answers on any path. A reload
+	// rewrites it while requests are being served, so it is guarded.
+	mu       sync.RWMutex
 	services map[string]bool
 }
 
@@ -27,16 +30,30 @@ type Handler struct {
 func NewHandler(auth *auth.Service, engine *security.Engine,
 	downstream *config.SecurityRequirement, services []string) *Handler {
 
+	h := &Handler{
+		auth:       auth,
+		security:   engine,
+		downstream: downstream,
+	}
+	h.SetServices(services)
+	return h
+}
+
+// SetServices replaces the set of routable service names.
+func (h *Handler) SetServices(services []string) {
 	known := make(map[string]bool, len(services))
 	for _, name := range services {
 		known[name] = true
 	}
-	return &Handler{
-		auth:       auth,
-		security:   engine,
-		downstream: downstream,
-		services:   known,
-	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.services = known
+}
+
+func (h *Handler) knows(name string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.services[name]
 }
 
 // requireKnownService rejects a route that names no configured service.
@@ -45,11 +62,14 @@ func NewHandler(auth *auth.Service, engine *security.Engine,
 // service is a wrong address, so it is reported as 404. Without this a typo in
 // the route would present as a service that exists and has no tools.
 func (h *Handler) requireKnownService(next http.Handler) http.Handler {
-	if h.services[""] {
-		return next
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !h.services[serviceNameFromPath(r.URL.Path)] {
+		// The single-service form answers on any path, so it is checked per
+		// request rather than once: a reload can change which form is in effect.
+		if h.knows("") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !h.knows(serviceNameFromPath(r.URL.Path)) {
 			http.NotFound(w, r)
 			return
 		}

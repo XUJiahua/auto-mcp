@@ -41,14 +41,22 @@ type Config struct {
 
 	// Services exposes several upstreams from one process, each on its own route.
 	Services []ServiceConfig `mapstructure:"services"`
+	// ServicesDir is scanned for service directories, so that adding an API is a
+	// matter of dropping in a directory rather than editing this file.
+	ServicesDir string `mapstructure:"services_dir"`
+
+	// discovered holds the last scan of ServicesDir. It is refreshed by
+	// Rediscover so that a reload is one observable step rather than a scan
+	// hidden inside a getter.
+	discovered []ServiceConfig
 }
 
 // EndpointConfig describes the API being proxied. Authentication to it is
 // configured with upstream_security rather than here, so that the credential is
 // described in the same vocabulary as the one callers present.
 type EndpointConfig struct {
-	BaseURL string            `json:"base_url" mapstructure:"base_url"`
-	Headers map[string]string `json:"headers" mapstructure:"headers"`
+	BaseURL string            `json:"base_url" mapstructure:"base_url" yaml:"base_url"`
+	Headers map[string]string `json:"headers" mapstructure:"headers" yaml:"headers"`
 }
 
 type ServerMode string

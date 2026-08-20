@@ -153,6 +153,62 @@ A few rules:
 - `stdio` serves a single service. It speaks to one client over one pipe, so
   there is no address to tell services apart by.
 
+### Dropping in a service directory
+
+`services_dir` is scanned for subdirectories, each becoming a service named after
+itself. Adding an API then means adding a directory rather than editing
+configuration:
+
+```
+services/
+  hotel/
+    openapi.yaml      # or .yml/.json, or swagger.*
+    service.yaml      # optional: endpoint, upstream_security, adjustment_file
+    adjustment.yaml   # optional, picked up without being named
+  flight/
+    openapi.json
+```
+
+```yaml
+services_dir: services
+```
+
+`service.yaml` carries what the document cannot — where to send the requests and
+which credential to use:
+
+```yaml
+endpoint:
+  base_url: https://hotel.example.com
+upstream_security:
+  id: hotel_key
+```
+
+It cannot set the name or the document path: those come from the directory, and a
+file able to rename its own directory would make the route depend on two places
+at once. Discovered and explicitly listed services combine; a name declared in
+both is an error.
+
+A directory without an OpenAPI document is an error rather than a skip, because
+skipping would make a misnamed document look like a service with no tools.
+
+### Reloading without a restart
+
+`SIGHUP` rescans `services_dir` and brings the running server in line with it:
+
+```bash
+kill -HUP $(pgrep auto-mcp)
+```
+
+Existing services are updated in place, keeping their `mcp.Server`, so **open
+sessions stay connected** and receive `notifications/tools/list_changed` as tools
+are added or removed. That is the protocol's own answer to a changing tool set,
+so a reload neither disconnects clients nor leaves them holding a list that no
+longer exists.
+
+A reload that cannot be completed changes nothing: every service is rebuilt
+before any of them is swapped in, so a spec that stopped parsing leaves a process
+that was serving correctly still serving. The failure is logged.
+
 ## ✂️ Shaping upstream responses
 
 The adjustment file already selects routes and rewrites descriptions; it also

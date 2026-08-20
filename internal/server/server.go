@@ -5,8 +5,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/brizzai/auto-mcp/internal/auth"
@@ -39,11 +43,19 @@ var ErrInvalidOAuthProvider = fmt.Errorf("unsupported OAuth provider")
 // authentication, which is what keeps one upstream's credential from reaching
 // another's endpoint.
 type Server struct {
-	config   *config.Config
+	config *config.Config
+
+	// mu guards services, single and toolNames, which a reload rewrites while
+	// requests are being routed.
+	mu       sync.RWMutex
 	services map[string]*mcp.Server
 	// single is set when the configuration names no services, in which case the
 	// one endpoint answers on any path and keeps its address.
-	single  *mcp.Server
+	single *mcp.Server
+	// toolNames records what each service currently exposes, so a reload can
+	// remove exactly the tools that went away.
+	toolNames map[string][]string
+
 	auth    *auth.Service
 	handler *handler.Handler
 	tool    *tool.Handler
@@ -58,8 +70,9 @@ func NewServer(cfg *config.Config) *Server {
 	}
 
 	srv := &Server{
-		config:   cfg,
-		services: map[string]*mcp.Server{},
+		config:    cfg,
+		services:  map[string]*mcp.Server{},
+		toolNames: map[string][]string{},
 	}
 
 	if cfg.OAuth != nil && cfg.OAuth.Enabled {
@@ -109,44 +122,133 @@ func (s *Server) setupAuth() error {
 }
 
 func (s *Server) setupTools() error {
-	services := s.config.ResolvedServices()
+	return s.apply(s.config.ResolvedServices())
+}
+
+// Reload rescans the configured services directory and brings the running server
+// in line with what it finds.
+//
+// Services are updated in place rather than replaced: an existing service keeps
+// its mcp.Server, so open sessions stay connected, and the SDK emits
+// notifications/tools/list_changed as tools are added and removed. That is the
+// protocol's own answer to a changing tool set, which is why a reload neither
+// disconnects clients nor leaves them looking at a list that no longer exists.
+//
+// A reload that cannot be completed changes nothing. Every new service is built
+// before anything is swapped in, so a spec that stopped parsing leaves a process
+// that was serving correctly still serving.
+func (s *Server) Reload() error {
+	if err := s.config.Rediscover(); err != nil {
+		return fmt.Errorf("rescanning services: %w", err)
+	}
+	return s.apply(s.config.ResolvedServices())
+}
+
+// apply makes the running set of services match the given configuration.
+func (s *Server) apply(services []config.ServiceConfig) error {
 	if len(services) == 0 {
 		return fmt.Errorf("no service is configured")
 	}
 
 	engine := security.New(s.config.SecuritySchemes)
+
+	// Everything is built first. Registering as we go would leave a half-applied
+	// configuration behind when a later service fails to parse.
+	type built struct {
+		service config.ServiceConfig
+		tools   []*registeredTool
+	}
+	prepared := make([]built, 0, len(services))
 	for _, service := range services {
-		mcpServer, err := s.buildService(service, engine)
+		tools, err := s.buildTools(service, engine)
 		if err != nil {
 			return err
 		}
-		s.services[service.Name] = mcpServer
-		if service.Name == "" {
-			s.single = mcpServer
+		prepared = append(prepared, built{service: service, tools: tools})
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	live := make(map[string]bool, len(prepared))
+	for _, entry := range prepared {
+		name := entry.service.Name
+		live[name] = true
+
+		mcpServer, existing := s.services[name]
+		if !existing {
+			mcpServer = mcp.NewServer(&mcp.Implementation{
+				Name:    s.serviceIdentity(entry.service),
+				Version: s.config.Server.Version,
+			}, nil)
+			s.services[name] = mcpServer
+			if name == "" {
+				s.single = mcpServer
+			}
 		}
-		logger.Info("Registered service",
-			zap.String("route", service.RoutePath()),
-			zap.String("spec", service.SwaggerFile))
+
+		// Removing the previous tools before adding the new ones keeps a renamed
+		// operation from lingering under its old name.
+		if previous := s.toolNames[name]; len(previous) > 0 {
+			mcpServer.RemoveTools(previous...)
+		}
+		names := make([]string, 0, len(entry.tools))
+		for _, registered := range entry.tools {
+			mcpServer.AddTool(registered.tool, registered.handler)
+			names = append(names, registered.tool.Name)
+		}
+		s.toolNames[name] = names
+
+		if existing {
+			logger.Info("Updated service",
+				zap.String("route", entry.service.RoutePath()),
+				zap.Int("tools", len(names)))
+		} else {
+			logger.Info("Registered service",
+				zap.String("route", entry.service.RoutePath()),
+				zap.String("spec", entry.service.SwaggerFile),
+				zap.Int("tools", len(names)))
+		}
+	}
+
+	for name := range s.services {
+		if live[name] {
+			continue
+		}
+		delete(s.services, name)
+		delete(s.toolNames, name)
+		if name == "" {
+			s.single = nil
+		}
+		logger.Info("Removed service", zap.String("name", name))
+	}
+
+	if s.handler != nil {
+		s.handler.SetServices(s.serviceNamesLocked())
 	}
 	return nil
 }
 
-// buildService turns one service configuration into an MCP server.
+// registeredTool pairs a tool with the handler that executes it.
+type registeredTool struct {
+	tool    *mcp.Tool
+	handler mcp.ToolHandler
+}
+
+func (s *Server) serviceIdentity(service config.ServiceConfig) string {
+	if service.Name == "" {
+		return s.config.Server.Name
+	}
+	return fmt.Sprintf("%s/%s", s.config.Server.Name, service.Name)
+}
+
+// buildTools reads one service's document and prepares its tools.
 //
 // The parser and the request builder are per-service instances rather than
 // shared ones: a parser holds the document it read, and a builder holds the
 // address and credential it sends to. Sharing either would let one upstream's
 // configuration answer for another.
-func (s *Server) buildService(service config.ServiceConfig, engine *security.Engine) (*mcp.Server, error) {
-	name := s.config.Server.Name
-	if service.Name != "" {
-		name = fmt.Sprintf("%s/%s", name, service.Name)
-	}
-	mcpServer := mcp.NewServer(&mcp.Implementation{
-		Name:    name,
-		Version: s.config.Server.Version,
-	}, nil)
-
+func (s *Server) buildTools(service config.ServiceConfig, engine *security.Engine) ([]*registeredTool, error) {
 	specParser := parser.NewSwaggerParser(parser.NewAdjuster())
 	if err := specParser.Init(service.SwaggerFile, service.AdjustmentFile); err != nil {
 		return nil, fmt.Errorf("service %q: failed to initialize parser: %w", service.Name, err)
@@ -156,7 +258,9 @@ func (s *Server) buildService(service config.ServiceConfig, engine *security.Eng
 	upstream := requester.NewRequester(&endpoint,
 		requester.NewAuthManager(engine, service.UpstreamSecurity))
 
-	for _, route := range specParser.GetRouteTools() {
+	routes := specParser.GetRouteTools()
+	tools := make([]*registeredTool, 0, len(routes))
+	for _, route := range routes {
 		executor, err := upstream.BuildRouteExecutor(route.RouteConfig)
 		if err != nil {
 			logger.Error("Failed to build route executor",
@@ -164,9 +268,12 @@ func (s *Server) buildService(service config.ServiceConfig, engine *security.Eng
 				zap.String("tool", route.Tool.Name), zap.Error(err))
 			continue
 		}
-		mcpServer.AddTool(route.Tool, s.tool.CreateHandler(route.Tool, route.ResponseTemplate, executor))
+		tools = append(tools, &registeredTool{
+			tool:    route.Tool,
+			handler: s.tool.CreateHandler(route.Tool, route.ResponseTemplate, executor),
+		})
 	}
-	return mcpServer, nil
+	return tools, nil
 }
 
 func (s *Server) ServeSSE(ctx context.Context) error {
@@ -185,6 +292,8 @@ func (s *Server) ServeHTTP(ctx context.Context) error {
 // construction, which is what lets one listener serve several upstreams. The
 // service is identified by the route segment after /mcp.
 func (s *Server) serverForRequest(r *http.Request) *mcp.Server {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.single != nil {
 		return s.single
 	}
@@ -202,6 +311,12 @@ func serviceNameFromPath(path string) string {
 // ServiceNames returns the configured service names, for the HTTP handler to
 // route on. An empty name means the single-service form, which answers anywhere.
 func (s *Server) ServiceNames() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.serviceNamesLocked()
+}
+
+func (s *Server) serviceNamesLocked() []string {
 	names := make([]string, 0, len(s.services))
 	for name := range s.services {
 		names = append(names, name)
@@ -255,10 +370,45 @@ func (s *Server) serveHTTP(ctx context.Context, handler http.Handler, mode strin
 func (s *Server) ServeSTDIO(ctx context.Context) error {
 	logger.Info("Starting STDIO server")
 	// setupTools rejects several services in stdio mode, so exactly one exists.
+	s.mu.RLock()
+	var only *mcp.Server
 	for _, mcpServer := range s.services {
-		return mcpServer.Run(ctx, &mcp.StdioTransport{})
+		only = mcpServer
+		break
 	}
-	return fmt.Errorf("no service is configured")
+	s.mu.RUnlock()
+	if only == nil {
+		return fmt.Errorf("no service is configured")
+	}
+	return only.Run(ctx, &mcp.StdioTransport{})
+}
+
+// WatchReloadSignals reloads on SIGHUP for as long as ctx is live.
+//
+// SIGHUP is the conventional "re-read your configuration" signal, and using it
+// keeps the reload path free of a network endpoint that would itself need
+// authenticating. A failed reload is logged and the running configuration is
+// kept: a signal is not a good place to take a working process down.
+func (s *Server) WatchReloadSignals(ctx context.Context) {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGHUP)
+
+	go func() {
+		defer signal.Stop(signals)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-signals:
+				logger.Info("Reloading configuration on SIGHUP")
+				if err := s.Reload(); err != nil {
+					logger.Error("Reload failed; keeping the running configuration", zap.Error(err))
+					continue
+				}
+				logger.Info("Reload complete", zap.Strings("services", s.ServiceNames()))
+			}
+		}
+	}()
 }
 
 // Start starts the server in the configured mode (SSE, HTTP, or STDIO).
@@ -269,6 +419,8 @@ func (s *Server) Start(ctx context.Context) error {
 		zap.String("mode", string(s.config.Server.Mode)),
 		zap.String("version", s.config.Server.Version),
 	)
+
+	s.WatchReloadSignals(ctx)
 
 	switch s.config.Server.Mode {
 	case config.ServerModeSSE:

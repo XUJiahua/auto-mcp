@@ -40,14 +40,39 @@ func (s ServiceConfig) RoutePath() string {
 	return mcpRoutePrefix + "/" + s.Name
 }
 
-// ResolvedServices returns the effective service list.
+// Rediscover rescans the services directory.
+//
+// Discovery is cached rather than run from ResolvedServices, which is read on
+// every reload and must not do disk I/O behind the caller's back or fail
+// halfway. Keeping the scan explicit is also what makes a reload a single
+// observable step: rescan, then rebuild.
+func (c *Config) Rediscover() error {
+	if c.ServicesDir == "" {
+		c.discovered = nil
+		return nil
+	}
+	discovered, err := discoverServices(c.ServicesDir)
+	if err != nil {
+		return err
+	}
+	c.discovered = discovered
+	return nil
+}
+
+// ResolvedServices returns the effective service list: the explicitly configured
+// services plus whatever the last scan of the services directory found.
 //
 // A top-level swagger_file is the single-service form, kept because the common
 // case is one API and because stdio has no path to route on. It is expressed as
 // a one-element list so that everything downstream has only one shape to handle.
 func (c *Config) ResolvedServices() []ServiceConfig {
-	if len(c.Services) > 0 {
-		return c.Services
+	// Explicit first, so a name declared in both places is reported with the
+	// discovered one as the duplicate.
+	combined := make([]ServiceConfig, 0, len(c.Services)+len(c.discovered))
+	combined = append(combined, c.Services...)
+	combined = append(combined, c.discovered...)
+	if len(combined) > 0 {
+		return combined
 	}
 	if c.SwaggerFile == "" {
 		return nil
@@ -62,6 +87,10 @@ func (c *Config) ResolvedServices() []ServiceConfig {
 
 // validateServices checks the service list and resolves its credentials.
 func (c *Config) validateServices() error {
+	if err := c.Rediscover(); err != nil {
+		return err
+	}
+
 	services := c.ResolvedServices()
 	if len(services) == 0 {
 		return fmt.Errorf("swagger file is required, please adjust the config or pass " +
@@ -69,12 +98,12 @@ func (c *Config) validateServices() error {
 	}
 
 	seen := make(map[string]bool, len(services))
-	for i := range c.Services {
-		service := &c.Services[i]
+	for i := range services {
+		service := &services[i]
 		if service.SwaggerFile == "" {
 			return fmt.Errorf("service %q has no swagger_file", service.Name)
 		}
-		if len(c.Services) > 1 && service.Name == "" {
+		if len(services) > 1 && service.Name == "" {
 			return fmt.Errorf("every service must be named when more than one is configured; " +
 				"the name is the route segment callers address")
 		}

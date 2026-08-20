@@ -27,8 +27,8 @@ func specFile(t *testing.T, dir, name, operationID string) string {
 	return path
 }
 
-// startServer runs the server on a free port and returns its base URL.
-func startServer(t *testing.T, cfg *config.Config) string {
+// startServer runs the server on a free port and returns it with its base URL.
+func startServer(t *testing.T, cfg *config.Config) (*Server, string) {
 	t.Helper()
 	port := freePort(t)
 	cfg.Server.Port = port
@@ -44,7 +44,7 @@ func startServer(t *testing.T, cfg *config.Config) string {
 
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 	waitForServer(t, base)
-	return base
+	return srv, base
 }
 
 func freePort(t *testing.T) int {
@@ -102,7 +102,7 @@ func TestRouting_EachServiceHasItsOwnEndpoint(t *testing.T) {
 				Endpoint: config.EndpointConfig{BaseURL: "http://127.0.0.1:2"}},
 		},
 	}
-	base := startServer(t, cfg)
+	_, base := startServer(t, cfg)
 
 	assert.Equal(t, []string{"getHotel"}, toolNames(t, base+"/mcp/hotel"))
 	assert.Equal(t, []string{"getFlight"}, toolNames(t, base+"/mcp/flight"))
@@ -119,7 +119,7 @@ func TestRouting_UnknownServiceIs404(t *testing.T) {
 				Endpoint: config.EndpointConfig{BaseURL: "http://127.0.0.1:1"}},
 		},
 	}
-	base := startServer(t, cfg)
+	_, base := startServer(t, cfg)
 
 	resp, err := http.Post(base+"/mcp/nope", "application/json", http.NoBody)
 	require.NoError(t, err)
@@ -136,7 +136,7 @@ func TestRouting_SingleServiceStaysAtTheRoot(t *testing.T) {
 		Server:      config.ServerConfig{Name: "auto-mcp", Version: "1.0.0"},
 		SwaggerFile: specFile(t, dir, "only.json", "getOnly"),
 	}
-	base := startServer(t, cfg)
+	_, base := startServer(t, cfg)
 
 	assert.Equal(t, []string{"getOnly"}, toolNames(t, base+"/mcp"))
 }

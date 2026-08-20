@@ -41,11 +41,11 @@ type SecurityScheme struct {
 // SecurityRequirement selects a scheme and supplies the credential to use with
 // it.
 type SecurityRequirement struct {
-	ID         string `mapstructure:"id" json:"id"`
-	Credential string `mapstructure:"credential" json:"credential,omitempty"`
+	ID         string `mapstructure:"id" json:"id" yaml:"id"`
+	Credential string `mapstructure:"credential" json:"credential,omitempty" yaml:"credential"`
 	// Passthrough forwards the caller's own credential upstream instead of using
 	// one of ours. It is only meaningful in the upstream direction.
-	Passthrough bool `mapstructure:"passthrough" json:"passthrough,omitempty"`
+	Passthrough bool `mapstructure:"passthrough" json:"passthrough,omitempty" yaml:"passthrough"`
 }
 
 // SecurityScheme looks up a scheme by id.

@@ -130,11 +130,49 @@ fx 的图随之简化:`parser.Module` 与 `requester.Module` 删除,`Server` 自
 (只取 `enum[0]` 当 example),且拍平时会丢掉中间对象节点的 `description`,所以
 分支结构那句话到不了任何 flag。那是消费方的缺口,不是这里的。
 
-## 5. 没有 spec 注册 / 热加载入口(仍未做)
+## 5. spec 注册 / 热加载 —— 已解决
 
-加一个商户现在等于改 `config.yaml` 再重启进程。目标形态需要其一:
-目录扫描(`specs/<noun>/openapi.yaml` + 每商户配置)+ SIGHUP reload，或一个
-管理用 HTTP 端点。注意这个端点本身要鉴权(见 #2)。
+两部分。
+
+**目录发现**:`services_dir` 下每个子目录是一个 service,名字取自目录名:
+
+```
+services/hotel/openapi.yaml      # 或 .yml/.json、swagger.*
+services/hotel/service.yaml      # 可选:endpoint、upstream_security、adjustment_file
+services/hotel/adjustment.yaml   # 可选,不必指名
+```
+
+`service.yaml` 承载文档表达不了的东西(发往哪、用哪把凭证),但**不能设名字与文档路径**
+—— 那两项来自目录;一个能给自己所在目录改名的文件会让路由同时取决于两个地方。
+目录里没有 OpenAPI 文档是**报错而不是跳过**:跳过会让一个名字写错的文档看起来像
+"一个没有工具的 service"。
+
+**SIGHUP 重载**:重新扫描目录并让运行中的 server 与之一致。
+
+```
+kill -HUP $(pgrep auto-mcp)
+```
+
+关键决定:**已存在的 service 原地更新,不换 `mcp.Server`**。于是打开的会话保持连接,
+并在工具增删时收到 `notifications/tools/list_changed` —— 这是协议自己对"工具集会变"
+给出的答案,所以重载既不需要断开客户端,也不会让客户端停在一份已不存在的列表上。
+(我原本准备让人在"旧会话继续用旧工具集"与"主动断开重连"之间选,查过 SDK 后发现
+`AddTool`/`RemoveTools` 会 `changeAndNotify`,这个选择不必做。)
+
+**重载失败则什么都不改**:所有 service 先全部构建完再整体换入,因此一份突然解析不了的
+spec 不会把一个正在正常服务的进程搞下线,失败只记日志。
+
+实测(进程不重启):
+
+```
+启动          Registered service {"route":"/mcp/hotel", "tools":1}
+              /mcp/flight → 404
+放入目录+HUP   Reloading configuration on SIGHUP
+              Registered service {"route":"/mcp/flight", "tools":1}
+              Updated service    {"route":"/mcp/hotel",  "tools":1}
+              Reload complete    {"services":["flight","hotel"]}
+              /mcp/flight → getFlight/查询机票 → 上游 9962
+```
 
 ## 6. 配置加载 —— 已解决(并修掉两个同区域的缺陷)
 
