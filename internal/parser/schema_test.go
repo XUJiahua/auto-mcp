@@ -197,3 +197,134 @@ func TestJSONSchemaFor_CyclicRefTerminates(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, recursionNote, child["description"])
 }
+
+// branchSchema builds one oneOf member: an object with a discriminator-style
+// enum plus its own fields.
+func branchSchema(kind string, required []string, props map[string]*openapi3.SchemaRef) *openapi3.SchemaRef {
+	all := map[string]*openapi3.SchemaRef{
+		"kind": {Value: &openapi3.Schema{Type: &openapi3.Types{"string"}, Enum: []any{kind}}},
+	}
+	for name, schema := range props {
+		all[name] = schema
+	}
+	return &openapi3.SchemaRef{Value: &openapi3.Schema{
+		Type:       &openapi3.Types{"object"},
+		Required:   append([]string{"kind"}, required...),
+		Properties: all,
+	}}
+}
+
+func str() *openapi3.SchemaRef {
+	return &openapi3.SchemaRef{Value: &openapi3.Schema{Type: &openapi3.Types{"string"}}}
+}
+
+// A property that appears in several branches with different enums must end up
+// with the union of those values. Keeping only the first branch's enum does not
+// merely lose information, it publishes a false constraint: the discriminator
+// would appear to accept one value, making every other branch unreachable.
+func TestJSONSchemaFor_BranchEnumsAreUnioned(t *testing.T) {
+	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
+		OneOf: openapi3.SchemaRefs{
+			branchSchema("card", []string{"cardNo"}, map[string]*openapi3.SchemaRef{"cardNo": str()}),
+			branchSchema("wallet", []string{"walletId"}, map[string]*openapi3.SchemaRef{"walletId": str()}),
+			branchSchema("points", []string{"points"}, map[string]*openapi3.SchemaRef{"points": str()}),
+		},
+	}})
+
+	kind := dig(t, got, "properties", "kind")
+	assert.ElementsMatch(t, []any{"card", "wallet", "points"}, kind["enum"])
+	assert.Equal(t, "string", kind["type"])
+}
+
+// The discriminator names the property that selects the branch. Dropping it
+// leaves a caller with a flat set of fields and no clue which one chooses.
+func TestJSONSchemaFor_DiscriminatorIsNamedInDescription(t *testing.T) {
+	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
+		Discriminator: &openapi3.Discriminator{PropertyName: "kind"},
+		OneOf: openapi3.SchemaRefs{
+			branchSchema("card", []string{"cardNo"}, map[string]*openapi3.SchemaRef{"cardNo": str()}),
+			branchSchema("wallet", []string{"walletId"}, map[string]*openapi3.SchemaRef{"walletId": str()}),
+		},
+	}})
+
+	description, _ := got["description"].(string)
+	assert.Contains(t, description, "selected by", "the note must say a property selects the branch")
+	assert.Contains(t, description, "kind", "and name that property")
+}
+
+// If one branch constrains a value and another does not, the value is
+// unconstrained across the union. Carrying the enum over would reject values the
+// second branch accepts.
+func TestJSONSchemaFor_EnumDroppedWhenOneBranchIsUnconstrained(t *testing.T) {
+	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
+		OneOf: openapi3.SchemaRefs{
+			branchSchema("card", nil, nil),
+			{Value: &openapi3.Schema{Type: &openapi3.Types{"object"}, Properties: map[string]*openapi3.SchemaRef{
+				"kind": str(),
+			}}},
+		},
+	}})
+
+	kind := dig(t, got, "properties", "kind")
+	assert.NotContains(t, kind, "enum", "an unconstrained branch widens the union to anything")
+}
+
+// Branches that disagree on a property's type publish both, rather than one
+// arbitrary winner.
+func TestJSONSchemaFor_ConflictingTypesAcrossBranchesArePublished(t *testing.T) {
+	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
+		AnyOf: openapi3.SchemaRefs{
+			{Value: &openapi3.Schema{Type: &openapi3.Types{"object"}, Properties: map[string]*openapi3.SchemaRef{
+				"amount": {Value: &openapi3.Schema{Type: &openapi3.Types{"string"}}},
+			}}},
+			{Value: &openapi3.Schema{Type: &openapi3.Types{"object"}, Properties: map[string]*openapi3.SchemaRef{
+				"amount": {Value: &openapi3.Schema{Type: &openapi3.Types{"integer"}}},
+			}}},
+		},
+	}})
+
+	amount := dig(t, got, "properties", "amount")
+	assert.ElementsMatch(t, []string{"integer", "string"}, amount["type"])
+}
+
+// A nested object appearing in several branches keeps only the requirements
+// every branch agrees on; a union would demand fields that only one branch uses.
+func TestJSONSchemaFor_NestedRequiredIsIntersectedAcrossBranches(t *testing.T) {
+	nested := func(required ...string) *openapi3.SchemaRef {
+		return &openapi3.SchemaRef{Value: &openapi3.Schema{
+			Type:     &openapi3.Types{"object"},
+			Required: required,
+			Properties: map[string]*openapi3.SchemaRef{
+				"a": str(), "b": str(), "c": str(),
+			},
+		}}
+	}
+	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
+		OneOf: openapi3.SchemaRefs{
+			{Value: &openapi3.Schema{Type: &openapi3.Types{"object"}, Properties: map[string]*openapi3.SchemaRef{
+				"payload": nested("a", "b"),
+			}}},
+			{Value: &openapi3.Schema{Type: &openapi3.Types{"object"}, Properties: map[string]*openapi3.SchemaRef{
+				"payload": nested("a", "c"),
+			}}},
+		},
+	}})
+
+	payload := dig(t, got, "properties", "payload")
+	assert.Equal(t, []string{"a"}, payload["required"])
+}
+
+// `not` cannot be expressed in a flattened schema, but dropping it silently
+// means a caller never learns the constraint exists.
+func TestJSONSchemaFor_NotConstraintIsNoted(t *testing.T) {
+	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
+		Type:        &openapi3.Types{"string"},
+		Description: "Currency code",
+		Not:         &openapi3.SchemaRef{Value: &openapi3.Schema{Enum: []any{"XXX"}}},
+	}})
+
+	description, _ := got["description"].(string)
+	assert.Contains(t, description, "Currency code", "the original description survives")
+	assert.Contains(t, description, "not", "the excluded shape must be mentioned")
+	assert.Contains(t, description, "XXX", "and say what is excluded when it can")
+}
