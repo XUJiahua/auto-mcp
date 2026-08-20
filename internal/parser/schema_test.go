@@ -386,3 +386,77 @@ func TestJSONSchemaFor_BothKeywordsGetSeparateClauses(t *testing.T) {
 	assert.Contains(t, props, "walletId")
 	assert.ElementsMatch(t, []any{"card", "wallet"}, dig(t, got, "properties", "kind")["enum"])
 }
+
+// branchList reads a composition keyword back as a list of schemas.
+func branchList(t *testing.T, schema map[string]any, keyword string) []map[string]any {
+	t.Helper()
+	raw, ok := schema[keyword]
+	require.True(t, ok, "expected a %s keyword, got keys %v", keyword, sortedKeys(schema))
+	list, ok := raw.([]map[string]any)
+	require.True(t, ok, "%s is not a list of schemas: %#v", keyword, raw)
+	return list
+}
+
+// The merged properties keep the branch fields reachable, and the original
+// keyword is emitted alongside them so the constraint stays machine-readable.
+// Both apply at once in JSON Schema, and their intersection is the constraint the
+// document stated.
+func TestJSONSchemaFor_OneOfIsKeptAlongsideTheMergedProperties(t *testing.T) {
+	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
+		OneOf: openapi3.SchemaRefs{
+			branchSchema("card", []string{"cardNo"}, map[string]*openapi3.SchemaRef{"cardNo": str()}),
+			branchSchema("wallet", []string{"walletId"}, map[string]*openapi3.SchemaRef{"walletId": str()}),
+		},
+	}})
+
+	// Reachability, as before.
+	props := dig(t, got, "properties")
+	assert.Contains(t, props, "cardNo")
+	assert.Contains(t, props, "walletId")
+	assert.NotContains(t, got, "required", "no branch field is unconditionally required")
+
+	// The constraint, now stated rather than described.
+	branches := branchList(t, got, "oneOf")
+	require.Len(t, branches, 2)
+	assert.ElementsMatch(t, []string{"cardNo", "kind"}, requiredList(t, branches[0]))
+	assert.ElementsMatch(t, []string{"kind", "walletId"}, requiredList(t, branches[1]))
+}
+
+// anyOf is emitted as anyOf. The two keywords mean different things, and the
+// distinction was previously only in prose.
+func TestJSONSchemaFor_AnyOfIsKeptAsAnyOf(t *testing.T) {
+	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
+		AnyOf: openapi3.SchemaRefs{
+			branchSchema("card", []string{"cardNo"}, map[string]*openapi3.SchemaRef{"cardNo": str()}),
+			branchSchema("wallet", []string{"walletId"}, map[string]*openapi3.SchemaRef{"walletId": str()}),
+		},
+	}})
+
+	assert.NotContains(t, got, "oneOf")
+	assert.Len(t, branchList(t, got, "anyOf"), 2)
+}
+
+// The merged properties widen facets — a discriminator's enum becomes the union
+// of every branch's value. The branches published alongside must not be widened
+// with them: a branch whose selector accepts every value no longer identifies
+// that branch, which would make the emitted constraint satisfiable by anything.
+func TestJSONSchemaFor_MergingDoesNotContaminateThePublishedBranches(t *testing.T) {
+	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
+		OneOf: openapi3.SchemaRefs{
+			branchSchema("card", []string{"cardNo"}, map[string]*openapi3.SchemaRef{"cardNo": str()}),
+			branchSchema("wallet", []string{"walletId"}, map[string]*openapi3.SchemaRef{"walletId": str()}),
+			branchSchema("points", []string{"points"}, map[string]*openapi3.SchemaRef{"points": str()}),
+		},
+	}})
+
+	// The union widened the top-level selector, as it must.
+	assert.ElementsMatch(t, []any{"card", "wallet", "points"},
+		dig(t, got, "properties", "kind")["enum"])
+
+	// Each published branch still selects only itself.
+	for i, want := range []string{"card", "wallet", "points"} {
+		branch := branchList(t, got, "oneOf")[i]
+		assert.Equal(t, []any{want}, dig(t, branch, "properties", "kind")["enum"],
+			"branch %d selector was widened by the merge", i)
+	}
+}

@@ -68,15 +68,29 @@ func convertSchema(ref *openapi3.SchemaRef, onPath map[*openapi3.Schema]bool, de
 		}
 	}
 
-	// oneOf and anyOf are flattened the same way, because the set of fields a
-	// caller can reach is the same either way, but they are described
-	// separately: a caller told "exactly one" will avoid combining fields that
-	// anyOf explicitly permits.
+	// oneOf and anyOf are both flattened into properties and published verbatim.
+	//
+	// The two keywords are independent and both apply, so their intersection is
+	// exactly the constraint the document stated: the merged properties describe
+	// each field's shape and keep it reachable, while the branch list keeps the
+	// constraint machine-readable. Publishing only the merge left "exactly one of
+	// these shapes" as a sentence in a description; publishing only the branches
+	// left every branch field unreachable to consumers that do not implement
+	// composition. Emitting both costs bytes and nothing else.
+	//
+	// The branches are converted a second time for publication rather than
+	// reusing the merged ones. Merging widens facets in place — a discriminator's
+	// enum becomes the union of every branch's value — and the merge inserts the
+	// branch's own property maps by reference. Sharing them would widen the
+	// published branches too, and a branch whose selector accepts every value no
+	// longer selects that branch.
 	if len(schema.OneOf) > 0 {
 		unionBranches(out, convertBranches(schema.OneOf, onPath, depth), "exactly one of the following shapes")
+		out["oneOf"] = convertBranches(schema.OneOf, onPath, depth)
 	}
 	if len(schema.AnyOf) > 0 {
 		unionBranches(out, convertBranches(schema.AnyOf, onPath, depth), "at least one of the following shapes")
+		out["anyOf"] = convertBranches(schema.AnyOf, onPath, depth)
 	}
 	// The discriminator belongs to the property rather than to either keyword,
 	// so it is named once even when both are present.
