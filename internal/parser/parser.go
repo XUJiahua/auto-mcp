@@ -685,8 +685,9 @@ func (p *SwaggerParser) processOperations() error {
 				if p.adjuster.ExistsInMCP(routeConfig.Path, routeConfig.Method) {
 					tool := p.generateTool(routeConfig)
 					p.routeTools = append(p.routeTools, &RouteTool{
-						RouteConfig: routeConfig,
-						Tool:        tool,
+						RouteConfig:      routeConfig,
+						Tool:             tool,
+						ResponseTemplate: p.adjuster.GetResponseTemplate(routeConfig.Path, routeConfig.Method),
 					})
 				}
 			}

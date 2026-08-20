@@ -3,6 +3,7 @@ package parser
 import (
 	"io"
 
+	"github.com/brizzai/auto-mcp/internal/models"
 	"github.com/brizzai/auto-mcp/internal/requester"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -12,6 +13,8 @@ import (
 type RouteTool struct {
 	RouteConfig *requester.RouteConfig
 	Tool        *mcp.Tool
+	// ResponseTemplate reshapes the upstream response, when one is configured.
+	ResponseTemplate *models.ResponseTemplate
 }
 
 // Parser handles parsing of Swagger/OpenAPI specifications

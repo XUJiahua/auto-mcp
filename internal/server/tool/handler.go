@@ -9,6 +9,7 @@ import (
 
 	"github.com/brizzai/auto-mcp/internal/auth/middleware"
 	"github.com/brizzai/auto-mcp/internal/logger"
+	"github.com/brizzai/auto-mcp/internal/models"
 	"github.com/brizzai/auto-mcp/internal/requester"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.uber.org/zap"
@@ -30,7 +31,8 @@ func NewHandler(authEnabled bool) *Handler {
 
 // CreateHandler creates a handler function for a specific tool.
 // It handles authentication validation and request execution.
-func (h *Handler) CreateHandler(tool *mcp.Tool, executor requester.RouteExecutor) mcp.ToolHandler {
+func (h *Handler) CreateHandler(tool *mcp.Tool, response *models.ResponseTemplate, executor requester.RouteExecutor) mcp.ToolHandler {
+	shaper := newResponseShaper(tool.Name, response)
 	return func(ctx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		// Validate authentication if enabled
 		if h.auth != nil {
@@ -60,9 +62,18 @@ func (h *Handler) CreateHandler(tool *mcp.Tool, executor requester.RouteExecutor
 
 		// Handle error responses
 		if resp.StatusCode >= http.StatusBadRequest {
+			if shaped, ok := shaper.shapeError(resp.Body); ok {
+				return errorResult(shaped), nil
+			}
 			return errorResult(fmt.Sprintf("HTTP Error %d: %s", resp.StatusCode, string(resp.Body))), nil
 		}
 
+		if shaped, ok := shaper.shape(resp.Body); ok {
+			// A template states what the caller should see. Sending the untrimmed
+			// payload as structured content alongside it would put back exactly
+			// what the operator removed.
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: shaped}}}, nil
+		}
 		return successResult(tool, resp.Body), nil
 	}
 }

@@ -98,6 +98,39 @@ This approach keeps all related files together and is ideal for local developmen
 
 ---
 
+## ✂️ Shaping upstream responses
+
+The adjustment file already selects routes and rewrites descriptions; it also
+carries per-route response templates. A whole upstream response is usually much
+larger and noisier than the part a caller needs — pagination metadata, internal
+trace ids, dozens of null fields — and all of it lands in a model's context.
+
+```yaml
+responses:
+  - path: /api/hotel
+    updates:
+      - method: GET
+        prepend_body: "Hotel: "
+        body: "{{ .bussinessResponse.hotelName }} ({{ .bussinessResponse.starRate }} stars)"
+        append_body: ""
+        error_body: "upstream refused: {{ .returnMsg }}"
+```
+
+`body` is a Go template evaluated against the parsed JSON response.
+`prepend_body` and `append_body` wrap the result and work with or without a
+`body` template. `error_body` replaces `body` when the upstream reports a
+failure, since the fields that explain a failure are rarely the ones that carry
+a result.
+
+A template that cannot be applied — malformed syntax, a response that is not
+JSON, a reference to a field that is not there — leaves the response untouched
+and logs why. Discarding the response would discard the only evidence of what
+the upstream actually said.
+
+When a template is configured the result carries no `structuredContent`: the
+template states what the caller should see, and sending the untrimmed payload
+alongside it would put back exactly what was removed.
+
 ## 🔑 Authenticating callers and upstreams
 
 Credentials are described once as **security schemes** and then referred to by

@@ -214,3 +214,36 @@ location 分组成 `{body,header,query,path}` 四层:扁平对模型更友好,�
   原来是文档单数、flag 复数、环境变量复数,三处不一致。
 - **`MethodConfig.QueryParams`**。已被带 location 的 `Params` 取代,留着只会让"查询参数
   有几个"这个问题有两个答案。
+
+## 12. 响应裁剪(borrow from higress)—— 已实现
+
+上游响应原样返回给调用方,而真实商户响应经常巨大且噪声高(分页元数据、内部 traceId、
+几十个空字段),这些全都进模型的上下文。higress 的 `responseTemplate` 是这一层的现成设计。
+
+实现挂在 **adjustment file** 上 —— 那里已经是「人工校订」的通道(选路由、改描述),
+按 (path, method) 索引:
+
+```yaml
+responses:
+  - path: /api/hotel
+    updates:
+      - method: GET
+        prepend_body: "Hotel: "
+        body: "{{ .bussinessResponse.hotelName }} ({{ .bussinessResponse.starRate }}星)"
+        error_body: "upstream refused: {{ .returnMsg }}"
+```
+
+实测:219 字节的上游响应裁到 19 字节。
+
+几条边界:
+- 模板在注册工具时解析一次,语法错误在启动时报,而不是每次调用。
+- 无法套用(语法错、响应非 JSON、引用了不存在的字段)时**原样返回响应**并记日志 ——
+  模板是运营的便利,丢掉响应等于丢掉"上游到底说了什么"的唯一证据。
+- 配了模板就**不再发 `structuredContent`**:模板声明的是"调用方该看到什么",
+  再把未裁剪的整份作为结构化内容发出去,等于把刚删掉的东西放回去。
+- `error_body` 与 `body` 分开,因为解释失败的字段通常不是承载结果的字段。
+  `prepend/append` 只作用于成功路径 —— 它们描述的是一个结果,而失败不是。
+
+higress 的 `requestTemplate`(URL/Header/Body 模板 + `argsToJsonBody` 等开关)**没有实现**。
+它解决的是"上游要的 body 形状与工具参数不是 1:1",而 auto-mcp 从 OpenAPI 直接推导时这种
+错配不出现;真需要时再补。

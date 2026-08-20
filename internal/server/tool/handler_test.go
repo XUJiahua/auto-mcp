@@ -23,7 +23,7 @@ func staticExecutor(status int, body string, captured *map[string]any) requester
 
 func call(t *testing.T, tool *mcp.Tool, exec requester.RouteExecutor, args any) *mcp.CallToolResult {
 	t.Helper()
-	handler := NewHandler(false).CreateHandler(tool, exec)
+	handler := NewHandler(false).CreateHandler(tool, nil, exec)
 
 	params := &mcp.CallToolParamsRaw{Name: tool.Name}
 	if args != nil {
@@ -137,7 +137,7 @@ func TestHandler_MalformedArgumentsAreRejectedBeforeCalling(t *testing.T) {
 		called = true
 		return &requester.Response{StatusCode: http.StatusOK}, nil
 	}
-	handler := NewHandler(false).CreateHandler(toolWithoutOutput(), exec)
+	handler := NewHandler(false).CreateHandler(toolWithoutOutput(), nil, exec)
 
 	result, err := handler(context.Background(), &mcp.CallToolRequest{
 		Params: &mcp.CallToolParamsRaw{Name: "queryHotelInfo", Arguments: json.RawMessage(`{"broken":`)},
