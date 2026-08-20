@@ -90,9 +90,11 @@ func TestWire_PostSendsBodyAndQueryParams(t *testing.T) {
 	req := buildWith(t, &requester.RouteConfig{
 		Method: http.MethodPost,
 		Path:   "/api/createOrder",
-		MethodConfig: requester.MethodConfig{Params: []requester.ParamConfig{
-			{Name: "channel", In: requester.ParamInQuery, Type: "string", Explode: true},
-		}},
+		MethodConfig: requester.MethodConfig{
+			BodyContentType: "application/json",
+			Params: []requester.ParamConfig{
+				{Name: "channel", In: requester.ParamInQuery, Type: "string", Explode: true},
+			}},
 	}, map[string]any{
 		"channel": "app",
 		"body":    map[string]any{"header": map[string]any{"sign": "S"}},
@@ -115,7 +117,7 @@ func TestWire_NestedBodyIsPreservedVerbatim(t *testing.T) {
 	req := buildWith(t, &requester.RouteConfig{
 		Method:       http.MethodPost,
 		Path:         "/api/queryHotelInfo",
-		MethodConfig: requester.MethodConfig{},
+		MethodConfig: requester.MethodConfig{BodyContentType: "application/json"},
 	}, map[string]any{"body": body})
 
 	require.NotNil(t, req.HttpRequest.Body)

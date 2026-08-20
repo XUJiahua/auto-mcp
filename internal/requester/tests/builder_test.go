@@ -46,6 +46,12 @@ func TestHTTPRequestBuilder_BuildRequest(t *testing.T) {
 			routeConfig: &requester.RouteConfig{
 				Method: "GET",
 				Path:   "/test-route",
+				// 声明这个查询参数。此前这里是空的，用例靠的是"未声明的参数
+				// 也会被塞进查询串"那条旧行为 —— 它把调用方的笔误变成一个
+				// 悄悄跑偏的请求，所以那条行为被去掉了。
+				MethodConfig: requester.MethodConfig{Params: []requester.ParamConfig{
+					{Name: "query", In: requester.ParamInQuery, Type: "string", Explode: true},
+				}},
 			},
 			authManager: &mockAuthManager{
 				applyAuthFunc: func(req *http.Request) error {
@@ -78,6 +84,9 @@ func TestHTTPRequestBuilder_BuildRequest(t *testing.T) {
 			routeConfig: &requester.RouteConfig{
 				Method: "POST",
 				Path:   "/create-resource",
+				// 声明请求体的媒体类型。文档声明了体，这里才发体 —— 此前空着
+				// 也能发，于是"文档没声明"与"fixture 忘了写"分不开。
+				MethodConfig: requester.MethodConfig{BodyContentType: "application/json"},
 			},
 			authManager: &mockAuthManager{
 				applyAuthFunc: func(req *http.Request) error {
