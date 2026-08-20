@@ -68,12 +68,20 @@ func convertSchema(ref *openapi3.SchemaRef, onPath map[*openapi3.Schema]bool, de
 		}
 	}
 
-	if branches := append(append(openapi3.SchemaRefs{}, schema.OneOf...), schema.AnyOf...); len(branches) > 0 {
-		converted := make([]map[string]any, 0, len(branches))
-		for _, branch := range branches {
-			converted = append(converted, convertSchema(branch, onPath, depth+1))
-		}
-		unionBranches(out, converted, schema.Discriminator)
+	// oneOf and anyOf are flattened the same way, because the set of fields a
+	// caller can reach is the same either way, but they are described
+	// separately: a caller told "exactly one" will avoid combining fields that
+	// anyOf explicitly permits.
+	if len(schema.OneOf) > 0 {
+		unionBranches(out, convertBranches(schema.OneOf, onPath, depth), "exactly one of the following shapes")
+	}
+	if len(schema.AnyOf) > 0 {
+		unionBranches(out, convertBranches(schema.AnyOf, onPath, depth), "at least one of the following shapes")
+	}
+	// The discriminator belongs to the property rather than to either keyword,
+	// so it is named once even when both are present.
+	if len(schema.OneOf)+len(schema.AnyOf) > 0 && schema.Discriminator != nil && schema.Discriminator.PropertyName != "" {
+		appendDescription(out, fmt.Sprintf("selected by %s", schema.Discriminator.PropertyName))
 	}
 
 	// `not` cannot be expressed once the schema is flattened, but dropping it
@@ -201,7 +209,8 @@ func mergeSchema(into, member map[string]any) {
 	}
 }
 
-// unionBranches collapses oneOf/anyOf branches into one object.
+// unionBranches collapses one composition keyword's branches into one object.
+// `rule` states which keyword produced them, in words.
 //
 // Per-branch requirements move into the description because they are
 // conditional, and a conditional requirement written as an unconditional one
@@ -213,7 +222,7 @@ func mergeSchema(into, member map[string]any) {
 // own single-value enum, so keeping the first branch's enum publishes a schema
 // claiming the discriminator accepts exactly one value, which makes every other
 // branch unreachable.
-func unionBranches(into map[string]any, branches []map[string]any, discriminator *openapi3.Discriminator) {
+func unionBranches(into map[string]any, branches []map[string]any, rule string) {
 	props := childProperties(into)
 	summaries := make([]string, 0, len(branches))
 	for i, branch := range branches {
@@ -236,11 +245,16 @@ func unionBranches(into map[string]any, branches []map[string]any, discriminator
 	into["type"] = "object"
 	delete(into, "required")
 
-	note := "exactly one of the following shapes: " + strings.Join(summaries, "; ")
-	if discriminator != nil && discriminator.PropertyName != "" {
-		note += fmt.Sprintf("; selected by %s", discriminator.PropertyName)
+	appendDescription(into, rule+": "+strings.Join(summaries, "; "))
+}
+
+// convertBranches converts every member of a composition keyword.
+func convertBranches(branches openapi3.SchemaRefs, onPath map[*openapi3.Schema]bool, depth int) []map[string]any {
+	out := make([]map[string]any, 0, len(branches))
+	for _, branch := range branches {
+		out = append(out, convertSchema(branch, onPath, depth+1))
 	}
-	appendDescription(into, note)
+	return out
 }
 
 // mergeBranchProperty folds one branch's view of a property into the union.

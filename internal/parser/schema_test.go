@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
@@ -327,4 +328,61 @@ func TestJSONSchemaFor_NotConstraintIsNoted(t *testing.T) {
 	assert.Contains(t, description, "Currency code", "the original description survives")
 	assert.Contains(t, description, "not", "the excluded shape must be mentioned")
 	assert.Contains(t, description, "XXX", "and say what is excluded when it can")
+}
+
+// oneOf and anyOf mean different things: exactly one branch versus at least one.
+// Both are flattened the same way because the set of reachable fields is the
+// same, but the description has to say which rule applies, or a caller reading
+// "exactly one" will avoid combining fields that anyOf explicitly permits.
+func TestJSONSchemaFor_AnyOfIsDescribedAsAtLeastOne(t *testing.T) {
+	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
+		AnyOf: openapi3.SchemaRefs{
+			branchSchema("card", []string{"cardNo"}, map[string]*openapi3.SchemaRef{"cardNo": str()}),
+			branchSchema("wallet", []string{"walletId"}, map[string]*openapi3.SchemaRef{"walletId": str()}),
+		},
+	}})
+
+	description, _ := got["description"].(string)
+	assert.Contains(t, description, "at least one of")
+	assert.NotContains(t, description, "exactly one of",
+		"anyOf permits satisfying several branches at once")
+}
+
+func TestJSONSchemaFor_OneOfIsDescribedAsExactlyOne(t *testing.T) {
+	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
+		OneOf: openapi3.SchemaRefs{
+			branchSchema("card", []string{"cardNo"}, map[string]*openapi3.SchemaRef{"cardNo": str()}),
+			branchSchema("wallet", []string{"walletId"}, map[string]*openapi3.SchemaRef{"walletId": str()}),
+		},
+	}})
+
+	description, _ := got["description"].(string)
+	assert.Contains(t, description, "exactly one of")
+	assert.NotContains(t, description, "at least one of")
+}
+
+// A schema may carry both keywords. Each gets its own clause, and the
+// discriminator is named once rather than repeated per keyword.
+func TestJSONSchemaFor_BothKeywordsGetSeparateClauses(t *testing.T) {
+	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
+		Discriminator: &openapi3.Discriminator{PropertyName: "kind"},
+		OneOf: openapi3.SchemaRefs{
+			branchSchema("card", []string{"cardNo"}, map[string]*openapi3.SchemaRef{"cardNo": str()}),
+		},
+		AnyOf: openapi3.SchemaRefs{
+			branchSchema("wallet", []string{"walletId"}, map[string]*openapi3.SchemaRef{"walletId": str()}),
+		},
+	}})
+
+	description, _ := got["description"].(string)
+	assert.Contains(t, description, "exactly one of")
+	assert.Contains(t, description, "at least one of")
+	assert.Equal(t, 1, strings.Count(description, "selected by"),
+		"the discriminator belongs to the property, not to each keyword")
+
+	// Fields from both keywords stay reachable, and the enums still union.
+	props := dig(t, got, "properties")
+	assert.Contains(t, props, "cardNo")
+	assert.Contains(t, props, "walletId")
+	assert.ElementsMatch(t, []any{"card", "wallet"}, dig(t, got, "properties", "kind")["enum"])
 }

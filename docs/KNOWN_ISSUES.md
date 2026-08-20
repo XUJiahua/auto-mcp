@@ -66,7 +66,7 @@ logger.Info("Running without authentication")
 顺带一个前提也随之满足:`outputSchema` 要求 2025-06-18 之后的协议，而旧库协商出来的是
 2025-03-26。现在协商结果是 **2025-11-25**。
 
-## 4. `oneOf` / `anyOf` 的转换是有损的(取舍待确认;两处缺陷已修)
+## 4. `oneOf` / `anyOf` 的转换是有损的(取舍待确认;缺陷已修)
 
 `internal/parser/jsonschema.go` 的 `unionBranches` 把分支并成一个对象:属性取并集、
 不标任何必填、分支要求写进 `description`。换来的是分支字段可达。
@@ -83,8 +83,9 @@ logger.Info("Running without authentication")
 - 条件必填降级为不必填。三支的必填求并集会变成"同时要求所有分支的字段",
   任何一次合法调用都会被判成缺参数,所以必填只能整体放弃。
 - 字段的归属关系。调用方从 schema 看不出 `cardNo` 与 `walletId` 不能同时给。
-- `oneOf`(恰好一支)与 `anyOf`(至少一支)被同样处理,description 里一律写
-  "exactly one of",对 `anyOf` 是错的措辞。**这一条还没修。**
+(`oneOf` 与 `anyOf` 的措辞混淆已修:两者仍按同样方式拍平——可达字段集合本来相同——但
+分别描述为 "exactly one of" 与 "at least one of",且 `discriminator` 只在两者都存在时
+也仍只提一次。)
 
 已修的两处(它们不是取舍,是错误):
 
@@ -108,16 +109,39 @@ logger.Info("Running without authentication")
 目录扫描(`specs/<noun>/openapi.yaml` + 每商户配置)+ SIGHUP reload，或一个
 管理用 HTTP 端点。注意这个端点本身要鉴权(见 #2)。
 
-## 6. 缺少 `config.yaml` 时无法仅用 flag / env 启动
+## 6. 配置加载 —— 已解决(并修掉两个同区域的缺陷)
 
-`config.Load()` 找不到配置文件就直接失败:
+原问题:`config.Load()` 把 `viper.ReadInConfig()` 的错误无条件返回,所以没有
+`config.yaml` 就直接启动失败:
 
 ```
 Failed to load configuration: Config File "config" Not Found in "[. /etc/auto-mcp]"
 ```
 
-文档把 CLI flag 与 `AUTO_MCP_*` 环境变量描述为可用的配置方式，但没有配置文件时
-两者都到不了启动那一步。容器化部署里这条最碍事。
+而文档把 CLI flag 与 `AUTO_MCP_*` 环境变量描述为完整的配置方式。容器化部署里这条最碍事。
+
+现在:文件缺失不再是错误(**解析失败仍然是错误** —— 静默退回默认值会启动一个无视运营
+意图的服务);同时注册了一套默认值,否则"容忍文件缺失"只是把失败挪了个地方——进程会
+用 0 端口、空服务名起来。默认 host 是 **loopback**:`/mcp` 自身没有鉴权(见 #2),
+一个完全没配置就起来的进程不该能从机器外访问,对外暴露必须是运营显式设 host 的决定。
+
+修这条的过程中实机验证暴露了两个同区域的缺陷,一并修了:
+
+- **`--mode` 的默认值覆盖了其他所有来源。** flag 默认值 `"stdio"` 非空,而那段覆盖
+  是无条件的,于是配置文件里的 `server.mode` 与文档承诺的 `AUTO_MCP_SERVER_MODE`
+  **从来没起过作用** —— 不显式传 `--mode` 就一定是 stdio(本仓自带的 `config.yaml`
+  写着 `mode: sse`,也一样无效)。改为把 flag 绑定到配置键,由 viper 施行
+  「显式 flag > 环境变量 > 文件 > 默认值」;viper 只在 flag 真被改过时才优先它。
+  另外:非法的 mode 以前被静默忽略,现在启动即失败。
+- **`--adjustment-file` 是文档里的写法,代码注册的是 `--adjustments-file`。**
+  文档与 README 共 6 处用单数形式,照抄任何一条都会 `unknown flag`。现在两种写法都接受。
+- **`AUTO_MCP_ENDPOINT_BASE_URL` 读不到。** `AutomaticEnv` 不足够:`Unmarshal` 只会
+  查 viper 已知的键,一个既没有默认值、也不在配置文件里、也没有绑定 flag 的键,
+  `Get` 读得到但进不了结构体。文档里承诺可用环境变量设置的键现在都显式 `BindEnv`。
+
+仍然不支持:**map 类型的键无法用环境变量设置**,即文档里的
+`AUTO_MCP_ENDPOINT_HEADERS_X_CUSTOM`。viper 没有从环境变量构造 map 的机制,要支持
+就得自己扫 `AUTO_MCP_ENDPOINT_HEADERS_*` 前缀。目前用配置文件设置 `endpoint.headers`。
 
 ## 7. 既有 lint 告警 —— 已解决
 

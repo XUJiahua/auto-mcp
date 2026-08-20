@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -56,6 +57,16 @@ const (
 	ServerModeHTTP  ServerMode = "http"
 )
 
+// valid reports whether the mode is one this server can serve.
+func (m ServerMode) valid() bool {
+	switch m {
+	case ServerModeSSE, ServerModeSTDIO, ServerModeHTTP:
+		return true
+	default:
+		return false
+	}
+}
+
 type ServerConfig struct {
 	Port    int        `mapstructure:"port"`
 	Host    string     `mapstructure:"host"`
@@ -89,7 +100,88 @@ func InitFlags() {
 	pflag.String("mode", string(ServerModeSTDIO), "Server mode (stdio|sse|http)")
 	pflag.String("swagger-file", "", "Path to the swagger file")
 	pflag.String("adjustments-file", "", "Path to the adjustments file")
+	// The documentation has always spelled this one in the singular, so both
+	// spellings are accepted rather than breaking either the docs or any script
+	// that already uses the plural.
+	pflag.String("adjustment-file", "", "Path to the adjustments file (alias of --adjustments-file)")
 	// Note: no pflag.Parse() here as it's called in main.go
+}
+
+// bindFlagsToConfigKeys ties each flag to the configuration key it sets.
+//
+// Binding by key rather than reading the flag afterwards is what makes the
+// documented precedence work. The --mode flag carries a non-empty default, so
+// applying it unconditionally overrode every other source: server.mode in a
+// config file and AUTO_MCP_SERVER_MODE both had no effect, and the process came
+// up in stdio unless --mode was passed explicitly. viper only prefers a bound
+// flag when it was actually changed, and falls back to its default last.
+func bindFlagsToConfigKeys() error {
+	bindings := map[string]string{
+		"server.mode":      "mode",
+		"swagger_file":     "swagger-file",
+		"adjustments_file": "adjustments-file",
+	}
+	for key, name := range bindings {
+		flag := pflag.CommandLine.Lookup(name)
+		if flag == nil {
+			continue
+		}
+		if err := viper.BindPFlag(key, flag); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// bindDocumentedEnvKeys registers the keys that docs/CONFIGURATION.md promises
+// are settable by environment variable but that have no default to make them
+// known to viper.
+//
+// AutomaticEnv alone is not enough: Unmarshal only consults the keys viper knows
+// about, so an environment variable for a key that appears in neither the
+// defaults, a config file, nor a bound flag is read by Get but never reaches the
+// struct. AUTO_MCP_ENDPOINT_BASE_URL was in exactly that position.
+func bindDocumentedEnvKeys() {
+	for _, key := range []string{
+		"endpoint.base_url",
+		"endpoint.auth_config.token",
+		"endpoint.auth_config.username",
+		"endpoint.auth_config.password",
+		"endpoint.auth_config.key",
+		"endpoint.auth_config.header",
+		"oauth.enabled",
+		"oauth.provider",
+		"oauth.client_id",
+		"oauth.client_secret",
+		"oauth.scopes",
+		"oauth.host",
+		"oauth.port",
+	} {
+		// BindEnv only fails when given no key at all.
+		_ = viper.BindEnv(key)
+	}
+}
+
+// setDefaults registers values that make a flags-only or environment-only start
+// produce a working process. Without them, tolerating a missing config file
+// would only move the failure: the server would bind port 0 under an empty name.
+func setDefaults() {
+	viper.SetDefault("server.mode", string(ServerModeSTDIO))
+	viper.SetDefault("server.port", 8080)
+	// Loopback by default. The MCP endpoint has no authentication of its own
+	// (see docs/KNOWN_ISSUES.md), so a process started with no configuration at
+	// all must not be reachable from off the machine; exposing it is an explicit
+	// decision the operator makes by setting a host.
+	viper.SetDefault("server.host", "localhost")
+	viper.SetDefault("server.timeout", "30s")
+	viper.SetDefault("server.name", "Auto MCP")
+	viper.SetDefault("server.version", "1.0.0")
+
+	viper.SetDefault("logging.level", "info")
+	viper.SetDefault("logging.format", "json")
+	viper.SetDefault("logging.color", true)
+
+	viper.SetDefault("endpoint.auth_type", string(AuthTypeNone))
 }
 
 func Load() (*Config, error) {
@@ -102,6 +194,12 @@ func Load() (*Config, error) {
 	if err := viper.BindPFlags(pflag.CommandLine); err != nil {
 		return nil, err
 	}
+	if err := bindFlagsToConfigKeys(); err != nil {
+		return nil, err
+	}
+	bindDocumentedEnvKeys()
+
+	setDefaults()
 
 	// Load ./config.yaml first
 	viper.SetConfigName("config")
@@ -110,8 +208,16 @@ func Load() (*Config, error) {
 
 	viper.AddConfigPath("/etc/auto-mcp")
 
+	// A missing config.yaml is not an error: flags and AUTO_MCP_* environment
+	// variables are documented as complete configuration paths on their own, and
+	// a container image has no reason to carry a config file. A file that exists
+	// but cannot be parsed is still fatal — silently falling back to defaults
+	// would start a server that ignores the operator's stated intent.
 	if err := viper.ReadInConfig(); err != nil {
-		return nil, err
+		var notFound viper.ConfigFileNotFoundError
+		if !errors.As(err, &notFound) && !os.IsNotExist(err) {
+			return nil, err
+		}
 	}
 
 	//Loading additionals config files
@@ -130,27 +236,20 @@ func Load() (*Config, error) {
 	if err := viper.Unmarshal(&config); err != nil {
 		return nil, err
 	}
-	// Set server mode from flag
-	if mode := viper.GetString("mode"); mode != "" {
-		switch ServerMode(mode) {
-		case ServerModeSSE, ServerModeSTDIO, ServerModeHTTP:
-			config.Server.Mode = ServerMode(mode)
-		}
+	// The flags are bound to their config keys, so viper has already applied the
+	// precedence explicit flag > environment > file > default. Only the alias
+	// spelling needs resolving by hand.
+	if pflag.CommandLine.Changed("adjustment-file") {
+		config.AdjustmentsFile = viper.GetString("adjustment-file")
 	}
 
-	// Set swagger file from flag or environment
-	if swaggerFile := viper.GetString("swagger-file"); swaggerFile != "" {
-		config.SwaggerFile = swaggerFile
+	if !config.Server.Mode.valid() {
+		return nil, fmt.Errorf("unsupported server mode %q, expected one of stdio, sse, http", config.Server.Mode)
 	}
 
 	// validate swagger file
 	if config.SwaggerFile == "" {
 		return nil, fmt.Errorf("swagger file is required, please adjust the config or pass --swagger-file or AUTO_MCP_SWAGGER_FILE environment variable")
-	}
-
-	// Set adjustments file from flag or environment
-	if adjustmentsFile := viper.GetString("adjustments-file"); adjustmentsFile != "" {
-		config.AdjustmentsFile = adjustmentsFile
 	}
 
 	if config.OAuth != nil && len(config.OAuth.Scopes) == 1 {
