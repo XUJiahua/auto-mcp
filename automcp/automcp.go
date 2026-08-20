@@ -59,6 +59,18 @@ type Options struct {
 type Tool struct {
 	Tool    *mcp.Tool
 	Handler mcp.ToolHandler
+	// Method and Path are the operation this tool came from.
+	//
+	// A host that lets someone choose which operations to take needs them: the
+	// choice is expressed as paths and methods, which is what an adjustment file
+	// selects on, while the person choosing sees tool names. Without the route
+	// here a host can only offer a raw file to write by hand, and nobody can write
+	// that for a document they have just uploaded.
+	//
+	// They are also worth showing on their own: "which endpoint does this tool
+	// call" is the first question anyone asks of a generated tool.
+	Method string
+	Path   string
 }
 
 // Service is the set of tools generated from one document.
@@ -120,6 +132,8 @@ func Build(opts Options) (*Service, error) {
 		service.tools = append(service.tools, Tool{
 			Tool:    route.Tool,
 			Handler: handlers.CreateHandler(route.Tool, route.ResponseTemplate, executor),
+			Method:  route.RouteConfig.Method,
+			Path:    route.RouteConfig.Path,
 		})
 	}
 	return service, nil

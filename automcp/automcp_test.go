@@ -254,3 +254,50 @@ func TestBuild_ServicesAreIndependent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(encoded), "petId")
 }
+
+// A host that lets someone pick which operations to take needs to know which
+// operation each tool came from: the selection is expressed as paths and methods
+// (that is what an adjustment file selects on), while the person doing the
+// picking sees tool names. Without the route on each tool, the host can only
+// offer a raw YAML box — and nobody can fill that in for a document they have
+// just uploaded.
+func TestToolsCarryTheirRoute(t *testing.T) {
+	svc, err := automcp.Build(automcp.Options{
+		Spec:    strings.NewReader(twoOperationSpec),
+		BaseURL: "https://api.example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	byName := map[string]automcp.Tool{}
+	for _, tool := range svc.Tools() {
+		byName[tool.Tool.Name] = tool
+	}
+
+	get, ok := byName["listPets"]
+	if !ok {
+		t.Fatalf("tools = %v", byName)
+	}
+	if get.Path != "/pets" || get.Method != "GET" {
+		t.Errorf("listPets route = %s %s", get.Method, get.Path)
+	}
+
+	post, ok := byName["addPet"]
+	if !ok {
+		t.Fatalf("tools = %v", byName)
+	}
+	if post.Path != "/pets" || post.Method != "POST" {
+		t.Errorf("addPet route = %s %s", post.Method, post.Path)
+	}
+}
+
+const twoOperationSpec = `{
+  "openapi": "3.0.1",
+  "info": {"title": "Pets", "version": "1.0"},
+  "paths": {
+    "/pets": {
+      "get": {"operationId": "listPets", "responses": {"200": {"description": "OK"}}},
+      "post": {"operationId": "addPet",
+        "requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}},
+        "responses": {"200": {"description": "OK"}}}}}}`
