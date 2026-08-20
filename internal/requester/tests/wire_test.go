@@ -130,3 +130,78 @@ func readAllBody(t *testing.T, req *requester.Request) string {
 	require.NoError(t, err)
 	return string(data)
 }
+
+// A form-encoded body is url-encoded, not JSON, and the header follows the
+// bytes rather than the declaration.
+func TestWire_FormEncodedBodyIsURLEncoded(t *testing.T) {
+	req := buildWith(t, &requester.RouteConfig{
+		Method:       http.MethodPost,
+		Path:         "/api/login",
+		MethodConfig: requester.MethodConfig{BodyContentType: "application/x-www-form-urlencoded"},
+	}, map[string]any{"body": map[string]any{"user": "alice", "pass": "s3cret"}})
+
+	assert.Equal(t, "application/x-www-form-urlencoded", req.ContentType)
+	body := readAllBody(t, req)
+	assert.Contains(t, body, "user=alice")
+	assert.Contains(t, body, "pass=s3cret")
+	assert.NotContains(t, body, "{", "a form body must not be JSON")
+}
+
+// An unset or JSON media type keeps the previous behaviour.
+func TestWire_JSONBodyIsUnchanged(t *testing.T) {
+	req := buildWith(t, &requester.RouteConfig{
+		Method:       http.MethodPost,
+		Path:         "/api/x",
+		MethodConfig: requester.MethodConfig{BodyContentType: "application/json"},
+	}, map[string]any{"body": map[string]any{"a": 1}})
+
+	assert.Equal(t, "application/json", req.ContentType)
+	assert.JSONEq(t, `{"a":1}`, readAllBody(t, req))
+}
+
+// A media type we cannot produce must not be claimed in the header. JSON is sent
+// and declared as JSON, so the bytes and the header agree; the mismatch with the
+// spec is visible in the logs rather than on the wire.
+func TestWire_UnsupportedMediaTypeFallsBackToJSONHonestly(t *testing.T) {
+	req := buildWith(t, &requester.RouteConfig{
+		Method:       http.MethodPost,
+		Path:         "/api/x",
+		MethodConfig: requester.MethodConfig{BodyContentType: "application/xml"},
+	}, map[string]any{"body": map[string]any{"a": 1}})
+
+	assert.Equal(t, "application/json", req.ContentType)
+	assert.JSONEq(t, `{"a":1}`, readAllBody(t, req))
+}
+
+// A string-typed body for a textual media type is sent as-is rather than being
+// wrapped in JSON quotes.
+func TestWire_TextBodyIsSentRaw(t *testing.T) {
+	req := buildWith(t, &requester.RouteConfig{
+		Method:       http.MethodPost,
+		Path:         "/api/x",
+		MethodConfig: requester.MethodConfig{BodyContentType: "text/plain"},
+	}, map[string]any{"body": "hello"})
+
+	assert.Equal(t, "text/plain", req.ContentType)
+	assert.Equal(t, "hello", readAllBody(t, req))
+}
+
+// An object in a query position has no correct serialisation. Skipping it and
+// saying so beats inventing one: a JSON blob in a query string looks like it was
+// sent successfully and fails somewhere far away.
+func TestWire_ObjectValuedQueryParamIsSkipped(t *testing.T) {
+	req := buildWith(t, &requester.RouteConfig{
+		Method: http.MethodGet,
+		Path:   "/api/search",
+		MethodConfig: requester.MethodConfig{Params: []requester.ParamConfig{
+			{Name: "filter", In: requester.ParamInQuery, Type: "object", Explode: true},
+			{Name: "city", In: requester.ParamInQuery, Type: "string", Explode: true},
+		}},
+	}, map[string]any{
+		"filter": map[string]any{"min": 1},
+		"city":   "SIN",
+	})
+
+	assert.Empty(t, req.HttpRequest.URL.Query()["filter"], "an object query parameter is not serialisable")
+	assert.Equal(t, "SIN", req.HttpRequest.URL.Query().Get("city"), "the other parameters still go through")
+}

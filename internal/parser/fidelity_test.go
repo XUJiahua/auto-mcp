@@ -382,3 +382,88 @@ func keysOfTools(m map[string]*RouteTool) []string {
 	}
 	return out
 }
+
+// A parameter may be declared at path level and again at the operation level;
+// the operation's declaration wins. Appending both leaves the argument listed
+// twice, which puts a duplicate in the tool's required set and, for a query
+// parameter, sends the value twice on the wire.
+const duplicateParamSpec = `{
+  "openapi": "3.0.1",
+  "info": { "title": "Dup", "version": "1.0" },
+  "paths": { "/api/order/{orderId}": {
+    "parameters": [
+      { "name": "orderId", "in": "path", "required": true, "schema": { "type": "string" },
+        "description": "from the path item" },
+      { "name": "locale", "in": "query", "required": true, "schema": { "type": "string" } }
+    ],
+    "get": {
+      "operationId": "getOrder",
+      "parameters": [
+        { "name": "orderId", "in": "path", "required": true, "schema": { "type": "string" },
+          "description": "from the operation" },
+        { "name": "locale", "in": "query", "required": true, "schema": { "type": "string" } }
+      ],
+      "responses": { "200": { "description": "OK" } } } } } }`
+
+func TestFidelity_DuplicateParameterDeclarationsAreMerged(t *testing.T) {
+	tools := toolsByName(t, parseSpec(t, duplicateParamSpec))
+	rt := tools["getOrder"]
+	require.NotNil(t, rt)
+
+	assert.ElementsMatch(t, []string{"orderId", "locale"}, toolRequired(t, rt.Tool),
+		"a parameter declared twice must appear once in required")
+
+	// The operation-level declaration is the more specific one.
+	assert.Equal(t, "from the operation", prop(t, rt.Tool, "orderId")["description"])
+
+	seen := map[string]int{}
+	for _, cfg := range rt.RouteConfig.MethodConfig.Params {
+		seen[string(cfg.In)+"/"+cfg.Name]++
+	}
+	for key, count := range seen {
+		assert.Equal(t, 1, count, "parameter %s recorded %d times", key, count)
+	}
+	assert.Equal(t, []string{"locale"}, rt.RouteConfig.MethodConfig.QueryParams)
+}
+
+// The request body media type decides how the body is encoded. Declaring
+// application/json while sending a form-encoded endpoint's arguments as JSON is
+// a silent mismatch the upstream rejects.
+const formBodySpec = `{
+  "openapi": "3.0.1",
+  "info": { "title": "Form", "version": "1.0" },
+  "paths": { "/api/login": { "post": {
+    "operationId": "login",
+    "requestBody": { "required": true, "content": { "application/x-www-form-urlencoded": {
+      "schema": { "type": "object", "required": ["user"], "properties": {
+        "user": { "type": "string" }, "pass": { "type": "string" } } } } } },
+    "responses": { "200": { "description": "OK" } } } } } }`
+
+func TestFidelity_FormEncodedBodyIsNotAdvertisedAsJSON(t *testing.T) {
+	tools := toolsByName(t, parseSpec(t, formBodySpec))
+	rt := tools["login"]
+	require.NotNil(t, rt)
+
+	assert.Equal(t, "application/x-www-form-urlencoded", rt.RouteConfig.MethodConfig.BodyContentType)
+	assert.NotEqual(t, "application/json", rt.RouteConfig.Headers["Content-Type"],
+		"the route must not claim JSON for a form-encoded body")
+}
+
+func TestFidelity_JSONBodyKeepsItsMediaType(t *testing.T) {
+	tools := toolsByName(t, parseSpec(t, merchantSpecJSON))
+	rt := tools["queryHotelInfo"]
+	require.NotNil(t, rt)
+
+	assert.Equal(t, "application/json", rt.RouteConfig.MethodConfig.BodyContentType)
+}
+
+// A request with no body must not declare a content type. It is the same rule as
+// for the body encoding: never state a media type that describes no bytes.
+func TestFidelity_BodylessRequestDeclaresNoContentType(t *testing.T) {
+	tools := toolsByName(t, parseSpec(t, merchantSpecJSON))
+	rt := tools["getOrderDetail"]
+	require.NotNil(t, rt)
+
+	assert.NotContains(t, rt.RouteConfig.Headers, "Content-Type",
+		"a GET carries no body, so it declares no content type")
+}

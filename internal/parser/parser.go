@@ -209,17 +209,45 @@ func (p *SwaggerParser) addParameters(schema *inputSchemaBuilder, route *request
 	}
 }
 
-// operationParameters merges path-level parameters into the operation's own;
-// the spec allows declaring shared parameters once per path.
+// operationParameters merges path-level parameters into the operation's own.
+//
+// The spec allows declaring shared parameters once per path item and overriding
+// them per operation, and identity is the (name, location) pair rather than the
+// name alone — the same name may legitimately appear as both a query and a
+// header parameter. Concatenating the two lists instead of merging them left the
+// argument recorded twice, which put a duplicate in the tool's required set and
+// made the builder send a duplicated query parameter twice on the wire.
 func (p *SwaggerParser) operationParameters(route *requester.RouteConfig, operation *openapi3.Operation) openapi3.Parameters {
+	type key struct {
+		name string
+		in   string
+	}
 	var out openapi3.Parameters
+	indexes := map[key]int{}
+
+	add := func(params openapi3.Parameters) {
+		for _, param := range params {
+			if param == nil || param.Value == nil || param.Value.Name == "" {
+				continue
+			}
+			id := key{name: param.Value.Name, in: param.Value.In}
+			if index, seen := indexes[id]; seen {
+				// A later declaration is the more specific one.
+				out[index] = param
+				continue
+			}
+			indexes[id] = len(out)
+			out = append(out, param)
+		}
+	}
+
 	if p.doc != nil && p.doc.Paths != nil {
 		if pathItem := p.doc.Paths.Find(route.Path); pathItem != nil {
-			out = append(out, pathItem.Parameters...)
+			add(pathItem.Parameters)
 		}
 	}
 	if operation != nil {
-		out = append(out, operation.Parameters...)
+		add(operation.Parameters)
 	}
 	return out
 }
@@ -270,7 +298,8 @@ func (p *SwaggerParser) findOperation(route *requester.RouteConfig) *openapi3.Op
 	}
 }
 
-// bodyParameter returns the request body schema and whether it is required.
+// bodyParameter returns the request body schema and whether it is required, and
+// records the media type the body has to be encoded as.
 func (p *SwaggerParser) bodyParameter(route *requester.RouteConfig, operation *openapi3.Operation) (map[string]any, bool) {
 	if operation == nil {
 		logger.Debug("No operation found",
@@ -278,10 +307,11 @@ func (p *SwaggerParser) bodyParameter(route *requester.RouteConfig, operation *o
 			zap.String("method", route.Method))
 		return nil, false
 	}
-	schema, required := getFirstBodySchema(operation)
+	schema, mediaType, required := selectBodySchema(operation)
 	if schema == nil {
 		return nil, false
 	}
+	route.MethodConfig.BodyContentType = mediaType
 	return bodySchema(schema), required
 }
 
@@ -330,42 +360,44 @@ func sortedContentTypes(content openapi3.Content) []string {
 	return out
 }
 
-func getFirstBodySchema(operation *openapi3.Operation) (*openapi3.SchemaRef, bool) {
-	if operation.RequestBody != nil && operation.RequestBody.Value != nil {
-		content := operation.RequestBody.Value.Content
+// bodyMediaTypePreference orders the media types this server can actually
+// encode. Anything outside the list is still accepted, but only after these.
+var bodyMediaTypePreference = []string{
+	"application/json",
+	"application/x-www-form-urlencoded",
+	"multipart/form-data",
+}
 
-		// If there's no content, return nil
-		if len(content) == 0 {
-			return nil, false
-		}
-
-		// If there's only one content type, return its schema
-		if len(content) == 1 {
-			for _, mediaType := range content {
-				return mediaType.Schema, operation.RequestBody.Value.Required
-			}
-		}
-
-		// If there are multiple content types, merge their schemas
-		mergedSchema := &openapi3.SchemaRef{
-			Value: &openapi3.Schema{
-				Type:       &openapi3.Types{"object"},
-				Properties: make(openapi3.Schemas),
-			},
-		}
-
-		// Merge all schemas
-		for _, mediaType := range content {
-			if mediaType.Schema != nil && mediaType.Schema.Value != nil {
-				for propName, propSchema := range mediaType.Schema.Value.Properties {
-					mergedSchema.Value.Properties[propName] = propSchema
-				}
-			}
-		}
-
-		return mergedSchema, operation.RequestBody.Value.Required
+// selectBodySchema picks one request body media type and returns its schema.
+//
+// The choice is deterministic — preferred types first, then the remaining ones
+// in name order — because Go map iteration would otherwise make the generated
+// tool depend on which media type happened to come out first.
+func selectBodySchema(operation *openapi3.Operation) (*openapi3.SchemaRef, string, bool) {
+	if operation.RequestBody == nil || operation.RequestBody.Value == nil {
+		return nil, "", false
 	}
-	return nil, false
+	body := operation.RequestBody.Value
+	if len(body.Content) == 0 {
+		return nil, "", false
+	}
+
+	for _, name := range bodyMediaTypePreference {
+		if mediaType, ok := body.Content[name]; ok && mediaType != nil {
+			return mediaType.Schema, name, body.Required
+		}
+	}
+	// A JSON-flavoured type such as application/merge-patch+json is encoded the
+	// same way as application/json.
+	for _, name := range sortedContentTypes(body.Content) {
+		if strings.HasSuffix(name, "+json") {
+			return body.Content[name].Schema, name, body.Required
+		}
+	}
+	for _, name := range sortedContentTypes(body.Content) {
+		return body.Content[name].Schema, name, body.Required
+	}
+	return nil, "", false
 }
 
 func schemaTypeOf(ref *openapi3.SchemaRef) string {
@@ -553,12 +585,13 @@ func (p *SwaggerParser) processOperations() error {
 
 // createRouteConfig creates a route configuration from a path and operation
 func (p *SwaggerParser) createRouteConfig(path, method string, operation *openapi3.Operation) *requester.RouteConfig {
+	// Content-Type is left unset here. It is added only when a request body is
+	// actually produced, and then from the encoding performed rather than from
+	// the declaration, so the header never describes bytes that were not sent.
 	routeConfig := &requester.RouteConfig{
-		Path:   path,
-		Method: method,
-		Headers: map[string]string{
-			"Content-Type": "application/json",
-		},
+		Path:    path,
+		Method:  method,
+		Headers: map[string]string{},
 	}
 	var desc string
 	// Add operation description if available

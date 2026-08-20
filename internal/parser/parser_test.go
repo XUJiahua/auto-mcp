@@ -524,10 +524,12 @@ func TestAddBodyParameter_ContentTypes(t *testing.T) {
 		props, ok := bodyProp["properties"].(map[string]any)
 		assert.True(t, ok, "Body should have properties")
 
-		// Log the actual structure for debugging
+		// One media type is chosen and its schema used as-is. Merging the
+		// properties of every declared media type into one body, which is what
+		// used to happen, invents a shape no content type actually accepts.
 		t.Logf("Body properties: %+v", props)
-		_, hasXmlField := props["xmlField"]
-		assert.True(t, hasXmlField, "Should have parsed the XML schema")
+		assert.Contains(t, props, "jsonField", "the preferred media type's schema is used")
+		assert.NotContains(t, props, "xmlField", "schemas from other media types are not merged in")
 	})
 
 	// Test with only XML content type
@@ -872,7 +874,9 @@ func TestParseComplexSpecs(t *testing.T) {
 		// Test POST /users
 		if postUsersTool, ok := routeMap["POST /users"]; ok {
 			assert.Equal(t, "post_users", postUsersTool.Tool.Name)
-			assert.Equal(t, "application/json", postUsersTool.RouteConfig.Headers["Content-Type"])
+			// The media type is recorded so the builder can encode to match it;
+			// the Content-Type header is set from the encoding actually performed.
+			assert.Equal(t, "application/json", postUsersTool.RouteConfig.MethodConfig.BodyContentType)
 		} else {
 			t.Error("POST /users route not found")
 		}

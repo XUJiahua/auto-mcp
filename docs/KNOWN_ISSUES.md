@@ -153,3 +153,23 @@ Failed to load configuration: Config File "config" Not Found in "[. /etc/auto-mc
 官方 SDK 的 `go.mod` 声明 `go 1.25.0`，因此本仓的 go 指令从 1.24.1 提到 1.25.0。
 `.github/workflows/*.yml` 与 `Dockerfile` 里固定的版本已同步更新。使用旧工具链构建的
 下游需要一并升级。
+
+## 9. 请求构造的三个缺陷 —— 已解决
+
+读 agentgateway 与 higress 的 OpenAPI 处理时对照出来的,都经实机确认:
+
+- **同一参数在 path item 与 operation 两级声明时重复入表。** 参数的身份是
+  (name, location) 而不是 name(同名可以既是 query 又是 header)。原来把两份列表直接
+  拼接,于是 required 里出现重复项,而重复声明的 query 参数会**在线上发两遍**
+  (`?locale=x&locale=x`)。现在按 (name, location) 合并,后声明的(operation 级)更具体、
+  优先。参照 agentgateway 的 `(name, ParameterType)` 去重。
+- **`Content-Type` 硬编码 `application/json`。** 一个只声明
+  `application/x-www-form-urlencoded` 的接口,body 被当 JSON 发出、头也声称是 JSON。
+  现在按声明的 media type 选择编码:json 系列走 JSON,`x-www-form-urlencoded` 走
+  url 编码,`text/*` 且 body 是字符串则原样发送,其余无法产出的类型退回 JSON **并如实
+  声明 JSON**——头永远描述实际发出的字节,而不是声明。没有 body 的请求不再声明任何
+  Content-Type。另外:多个 media type 并存时不再把各自的 properties 混合成一个 body
+  (那会拼出一个没有任何 content type 接受的形状),而是确定性地选一个。
+- **query / header 位置的对象值被 JSON 编码塞进去。** 现在跳过并告警。OpenAPI 的对象
+  序列化风格(deepObject 等)没有实现,而猜一种编码与正确编码在被上游拒绝之前无法区分。
+  参照 agentgateway 的 warn + skip。
