@@ -173,3 +173,20 @@ Failed to load configuration: Config File "config" Not Found in "[. /etc/auto-mc
 - **query / header 位置的对象值被 JSON 编码塞进去。** 现在跳过并告警。OpenAPI 的对象
   序列化风格(deepObject 等)没有实现,而猜一种编码与正确编码在被上游拒绝之前无法区分。
   参照 agentgateway 的 warn + skip。
+
+## 10. 工具展示名与参数名冲突 —— 已解决
+
+- **`title` 从不设置,`description` 被地址信息挤占。** 原来每个工具的 description 都是
+  `"POST /api/queryHotelInfo \n 真正的说明"`,而 MCP 的 `Title` 字段一直空着。方法与路径是
+  调用方无法据以行动的寻址细节,却挤在模型每次都要读过去的第一行。现在 `summary` 进
+  `Title`(截断 64 字符),`description` 用文档原文(`description` → `summary`),两者都没有
+  的操作才回落到 `METHOD /path`。参照 agentgateway 的 `with_title`。
+- **参数名在扁平命名空间里静默互相覆盖。** 工具参数共享一个命名空间,而 OpenAPI 参数只在
+  各自 location 内唯一,且请求体占用了 `body` 这个名字。实测:一个同时声明 query 与 header
+  同名参数、外加一个名为 `body` 的 query 参数的接口,**三个参数里有两个凭空消失**。现在
+  冲突方改名为 `<location>_<name>`,`ParamConfig.ArgName` 记住"从哪个参数读",`Name` 仍是
+  上游要的名字,并在 description 里注明映射关系。
+
+选择保留扁平命名空间(higress 亦是扁平 + `Position` 标注)而不是像 agentgateway 那样按
+location 分组成 `{body,header,query,path}` 四层:扁平对模型更友好,下游拍平也更自然。
+分组能天然免疫这类冲突,是这个选择的代价,现在用改名 + 检测来补。

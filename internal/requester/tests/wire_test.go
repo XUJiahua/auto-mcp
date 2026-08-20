@@ -205,3 +205,50 @@ func TestWire_ObjectValuedQueryParamIsSkipped(t *testing.T) {
 	assert.Empty(t, req.HttpRequest.URL.Query()["filter"], "an object query parameter is not serialisable")
 	assert.Equal(t, "SIN", req.HttpRequest.URL.Query().Get("city"), "the other parameters still go through")
 }
+
+// A renamed argument still reaches the upstream under the name the spec declared.
+func TestWire_RenamedArgumentUsesTheUpstreamName(t *testing.T) {
+	req := buildWith(t, &requester.RouteConfig{
+		Method: http.MethodPost,
+		Path:   "/api/search",
+		MethodConfig: requester.MethodConfig{
+			BodyContentType: "application/json",
+			Params: []requester.ParamConfig{
+				{Name: "token", ArgName: "token", In: requester.ParamInQuery, Type: "string", Explode: true},
+				{Name: "token", ArgName: "header_token", In: requester.ParamInHeader, Type: "string"},
+				{Name: "body", ArgName: "query_body", In: requester.ParamInQuery, Type: "string", Explode: true},
+			},
+		},
+	}, map[string]any{
+		"token":        "q-value",
+		"header_token": "h-value",
+		"query_body":   "b-value",
+		"body":         map[string]any{"q": "search"},
+	})
+
+	assert.Equal(t, "q-value", req.HttpRequest.URL.Query().Get("token"))
+	assert.Equal(t, "h-value", req.HttpRequest.Header.Get("token"))
+	assert.Equal(t, "b-value", req.HttpRequest.URL.Query().Get("body"),
+		"the parameter named body goes to the query under its own name")
+	assert.JSONEq(t, `{"q":"search"}`, readAllBody(t, req), "the request body is unaffected")
+	assert.Empty(t, req.HttpRequest.URL.Query().Get("header_token"),
+		"the renamed argument must not also appear as a query parameter")
+	assert.Empty(t, req.HttpRequest.URL.Query().Get("query_body"))
+}
+
+// A renamed path parameter substitutes into the template under the spec's name.
+func TestWire_RenamedPathParamSubstitutes(t *testing.T) {
+	req := buildWith(t, &requester.RouteConfig{
+		Method: http.MethodPost,
+		Path:   "/api/order/{body}",
+		MethodConfig: requester.MethodConfig{
+			BodyContentType: "application/json",
+			Params: []requester.ParamConfig{
+				{Name: "body", ArgName: "path_body", In: requester.ParamInPath, Type: "string"},
+			},
+		},
+	}, map[string]any{"path_body": "SO1", "body": map[string]any{"a": 1}})
+
+	assert.Equal(t, "/api/order/SO1", req.HttpRequest.URL.Path)
+	assert.JSONEq(t, `{"a":1}`, readAllBody(t, req))
+}

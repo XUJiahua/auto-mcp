@@ -79,7 +79,7 @@ func (b *HTTPRequestBuilder) BuildRequest(ctx context.Context, params map[string
 	// Declared header parameters come from the caller's arguments and take
 	// precedence over the static configuration for the same name.
 	for _, cfg := range byLocation[ParamInHeader] {
-		value, present := params[cfg.Name]
+		value, present := params[cfg.Arg()]
 		if !present || value == nil {
 			continue
 		}
@@ -106,7 +106,7 @@ func (b *HTTPRequestBuilder) BuildRequest(ctx context.Context, params map[string
 		httpReq.Header.Set("Content-Type", contentType)
 	}
 	for _, cfg := range byLocation[ParamInCookie] {
-		value, present := params[cfg.Name]
+		value, present := params[cfg.Arg()]
 		if !present || value == nil {
 			continue
 		}
@@ -156,26 +156,26 @@ func (b *HTTPRequestBuilder) buildURL(path string, params map[string]interface{}
 	consumed := map[string]bool{}
 	url := b.serviceCfg.BaseURL + path
 
-	substitute := func(name string) {
-		value, ok := params[name]
+	substitute := func(upstreamName, argName string) {
+		value, ok := params[argName]
 		if !ok || value == nil {
 			return
 		}
-		placeholder := fmt.Sprintf("{%s}", name)
+		placeholder := fmt.Sprintf("{%s}", upstreamName)
 		if !strings.Contains(url, placeholder) {
 			return
 		}
 		url = strings.ReplaceAll(url, placeholder, urlpkg.PathEscape(fmt.Sprintf("%v", value)))
-		consumed[name] = true
+		consumed[argName] = true
 	}
 
 	for _, cfg := range byLocation[ParamInPath] {
-		substitute(cfg.Name)
+		substitute(cfg.Name, cfg.Arg())
 	}
 	// Placeholders the spec never declared still have to be filled, otherwise
 	// the braces reach the upstream verbatim.
 	for name := range params {
-		substitute(name)
+		substitute(name, name)
 	}
 	return url, consumed
 }
@@ -191,10 +191,12 @@ func (b *HTTPRequestBuilder) addQueryParams(baseURL string, params map[string]in
 		return baseURL
 	}
 
+	// Keyed by argument name: this decides which of the caller's arguments have
+	// already been placed somewhere, not which upstream names exist.
 	declared := map[string]bool{}
 	for _, cfgs := range byLocation {
 		for _, cfg := range cfgs {
-			declared[cfg.Name] = true
+			declared[cfg.Arg()] = true
 		}
 	}
 
@@ -218,7 +220,7 @@ func (b *HTTPRequestBuilder) addQueryParams(baseURL string, params map[string]in
 	}
 
 	for _, cfg := range byLocation[ParamInQuery] {
-		if value, ok := params[cfg.Name]; ok {
+		if value, ok := params[cfg.Arg()]; ok {
 			add(cfg.Name, value, cfg.Explode)
 		}
 	}

@@ -32,14 +32,27 @@ const (
 // is why path parameters used to be appended to the query string as well and
 // header parameters were never sent at all.
 type ParamConfig struct {
-	Name string        `json:"name"`
-	In   ParamLocation `json:"in"`
+	// Name is the parameter name the upstream expects.
+	Name string `json:"name"`
+	// ArgName is the tool argument this parameter reads from. It differs from
+	// Name only when two parameters would have collided in the tool's flat
+	// argument namespace and one had to be renamed.
+	ArgName string        `json:"arg_name,omitempty"`
+	In      ParamLocation `json:"in"`
 	// Type is the JSON Schema type, needed because an array has to be expanded
 	// into repeated query keys rather than formatted as a Go value.
 	Type string `json:"type,omitempty"`
 	// Explode follows OpenAPI serialisation: repeated keys when true (the
 	// default for query parameters), comma-joined when false.
 	Explode bool `json:"explode"`
+}
+
+// Arg returns the tool argument name this parameter reads from.
+func (p ParamConfig) Arg() string {
+	if p.ArgName != "" {
+		return p.ArgName
+	}
+	return p.Name
 }
 
 // MethodConfig holds method-specific configurations

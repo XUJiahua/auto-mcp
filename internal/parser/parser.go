@@ -58,17 +58,64 @@ func (p *SwaggerParser) generateTool(route *requester.RouteConfig) *mcp.Tool {
 
 	if route.Method == http.MethodPost || route.Method == http.MethodPut || route.Method == http.MethodPatch {
 		if body, required := p.bodyParameter(route, operation); body != nil {
-			schema.add("body", body, required)
+			schema.add(bodyArgName, body, required)
 		}
 	}
 
 	return &mcp.Tool{
 		Name:         p.toolName(route, operation),
-		Description:  fmt.Sprintf("%s %s \n %s", route.Method, route.Path, route.Description),
+		Title:        toolTitle(operation),
+		Description:  toolDescription(route, operation),
 		InputSchema:  schema.build(),
 		OutputSchema: responseSchema(operation),
 		Annotations:  methodAnnotations(route.Method),
 	}
+}
+
+// maxTitleLength keeps the display name short enough to be a display name.
+const maxTitleLength = 64
+
+// bodyArgName is the tool argument that carries the request body.
+const bodyArgName = "body"
+
+// toolTitle puts the summary where MCP expects a human-readable display name.
+// The spec's display precedence is title, then annotations.title, then name.
+func toolTitle(operation *openapi3.Operation) string {
+	if operation == nil {
+		return ""
+	}
+	summary := strings.TrimSpace(operation.Summary)
+	if summary == "" {
+		return ""
+	}
+	return truncateRunes(summary, maxTitleLength)
+}
+
+// toolDescription is what the document says about the operation.
+//
+// The method and path used to be prefixed onto every description. They are
+// addressing details the caller cannot act on, and they pushed the actual text
+// behind a line the model has to read past on every tool. They remain the
+// fallback for an operation the document says nothing about, where knowing that
+// much is better than knowing nothing.
+func toolDescription(route *requester.RouteConfig, operation *openapi3.Operation) string {
+	if described := strings.TrimSpace(route.Description); described != "" {
+		return described
+	}
+	if operation != nil {
+		if summary := strings.TrimSpace(operation.Summary); summary != "" {
+			return summary
+		}
+	}
+	return fmt.Sprintf("%s %s", route.Method, route.Path)
+}
+
+func truncateRunes(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
 }
 
 // methodAnnotations states only what the HTTP method actually establishes.
@@ -177,7 +224,10 @@ func (p *SwaggerParser) uniqueToolName(base string) string {
 // addParameters exposes path, query, header and cookie parameters with the
 // type, enum, default and example the spec declared for them.
 func (p *SwaggerParser) addParameters(schema *inputSchemaBuilder, route *requester.RouteConfig, operation *openapi3.Operation) {
-	for _, param := range p.operationParameters(route, operation) {
+	params := p.operationParameters(route, operation)
+	argNames := assignArgNames(params, hasRequestBody(operation))
+
+	for _, param := range params {
 		if param.Value == nil || param.Value.Name == "" {
 			continue
 		}
@@ -193,7 +243,12 @@ func (p *SwaggerParser) addParameters(schema *inputSchemaBuilder, route *request
 		// Path parameters are always required regardless of what the spec says:
 		// the URL cannot be built without them.
 		required := value.Required || value.In == string(requester.ParamInPath)
-		schema.add(value.Name, paramSchema, required)
+
+		argName := argNames[paramKey{name: value.Name, in: value.In}]
+		if argName != value.Name {
+			paramSchema["description"] = collisionNote(paramSchema["description"], value.Name, value.In)
+		}
+		schema.add(argName, paramSchema, required)
 	}
 
 	// Path placeholders that the spec forgot to declare still have to be
@@ -207,6 +262,64 @@ func (p *SwaggerParser) addParameters(schema *inputSchemaBuilder, route *request
 			"description": fmt.Sprintf("Path parameter: %s (not declared in the spec)", name),
 		}, true)
 	}
+}
+
+// paramKey identifies a parameter. Location is part of the identity because the
+// same name may appear in more than one location.
+type paramKey struct {
+	name string
+	in   string
+}
+
+// assignArgNames maps each parameter onto a unique tool argument name.
+//
+// Tool arguments share one flat namespace, while parameters are only unique per
+// location, and the request body occupies the name "body". Two parameters that
+// wanted the same argument name used to overwrite each other in that namespace,
+// so one of them vanished from the tool with no indication — as did any
+// parameter actually named "body". The colliding one is renamed to
+// "<location>_<name>" instead; the wire name is unaffected.
+//
+// Assignment follows the parameter order, which is path-item declarations before
+// operation ones, so it is stable for a given document.
+func assignArgNames(params openapi3.Parameters, bodyTaken bool) map[paramKey]string {
+	taken := map[string]bool{}
+	if bodyTaken {
+		taken[bodyArgName] = true
+	}
+	out := make(map[paramKey]string, len(params))
+
+	for _, param := range params {
+		if param == nil || param.Value == nil || param.Value.Name == "" {
+			continue
+		}
+		name, in := param.Value.Name, param.Value.In
+		candidate := name
+		if taken[candidate] {
+			candidate = in + "_" + name
+		}
+		for suffix := 2; taken[candidate]; suffix++ {
+			candidate = fmt.Sprintf("%s_%s_%d", in, name, suffix)
+		}
+		taken[candidate] = true
+		out[paramKey{name: name, in: in}] = candidate
+	}
+	return out
+}
+
+// collisionNote records the upstream name a renamed argument maps to, so the
+// rename is visible to whoever reads the tool rather than only in the config.
+func collisionNote(existing any, name, in string) string {
+	note := fmt.Sprintf("sent as the %s parameter %q", in, name)
+	if text, ok := existing.(string); ok && text != "" {
+		return text + "\n" + note
+	}
+	return note
+}
+
+func hasRequestBody(operation *openapi3.Operation) bool {
+	return operation != nil && operation.RequestBody != nil &&
+		operation.RequestBody.Value != nil && len(operation.RequestBody.Value.Content) > 0
 }
 
 // operationParameters merges path-level parameters into the operation's own.
@@ -624,13 +737,16 @@ func (p *SwaggerParser) createRouteConfig(path, method string, operation *openap
 		Params:      make([]requester.ParamConfig, 0),
 	}
 
-	for _, param := range p.operationParameters(routeConfig, operation) {
+	specParams := p.operationParameters(routeConfig, operation)
+	argNames := assignArgNames(specParams, hasRequestBody(operation))
+	for _, param := range specParams {
 		if param.Value == nil || param.Value.Name == "" {
 			continue
 		}
 		value := param.Value
 		cfg := requester.ParamConfig{
 			Name:    value.Name,
+			ArgName: argNames[paramKey{name: value.Name, in: value.In}],
 			In:      requester.ParamLocation(value.In),
 			Type:    schemaTypeOf(value.Schema),
 			Explode: value.Explode == nil || *value.Explode,

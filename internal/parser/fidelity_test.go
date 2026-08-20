@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/brizzai/auto-mcp/internal/requester"
+
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -466,4 +468,87 @@ func TestFidelity_BodylessRequestDeclaresNoContentType(t *testing.T) {
 
 	assert.NotContains(t, rt.RouteConfig.Headers, "Content-Type",
 		"a GET carries no body, so it declares no content type")
+}
+
+// MCP has a Title field for the human-readable name; the summary belongs there
+// rather than being concatenated into the description. Display precedence in the
+// spec is title, then annotations.title, then name.
+func TestFidelity_SummaryBecomesTheTitle(t *testing.T) {
+	tools := toolsByName(t, parseSpec(t, merchantSpecJSON))
+	rt := tools["queryHotelInfo"]
+	require.NotNil(t, rt)
+
+	assert.Equal(t, "Query hotel detail", rt.Tool.Title)
+}
+
+// The description is what the document says about the operation. The method and
+// path are addressing details that the caller cannot act on, and they crowded
+// out the actual text.
+func TestFidelity_DescriptionIsTheDocumentedText(t *testing.T) {
+	tools := toolsByName(t, parseSpec(t, merchantSpecJSON))
+
+	assert.Equal(t, "Query hotel detail", tools["queryHotelInfo"].Tool.Description)
+	assert.NotContains(t, tools["queryHotelInfo"].Tool.Description, "/api/queryHotelInfo")
+}
+
+// A tool with neither summary nor description still needs something to go on, so
+// the method and path remain the fallback.
+func TestFidelity_UndocumentedOperationFallsBackToMethodAndPath(t *testing.T) {
+	const bare = `{
+      "openapi": "3.0.1", "info": { "title": "Bare", "version": "1.0" },
+      "paths": { "/api/thing": { "get": { "operationId": "getThing",
+        "responses": { "200": { "description": "OK" } } } } } }`
+
+	tools := toolsByName(t, parseSpec(t, bare))
+	require.Contains(t, tools, "getThing")
+
+	assert.Contains(t, tools["getThing"].Tool.Description, "/api/thing")
+	assert.Contains(t, tools["getThing"].Tool.Description, "GET")
+}
+
+// Arguments live in one flat namespace, so two parameters in different locations
+// that share a name would silently overwrite each other, and a parameter named
+// "body" would collide with the request body. The collision is renamed rather
+// than dropped, and the original name is kept for the wire.
+const collidingParamSpec = `{
+  "openapi": "3.0.1",
+  "info": { "title": "Collide", "version": "1.0" },
+  "paths": { "/api/search": { "post": {
+    "operationId": "search",
+    "parameters": [
+      { "name": "token", "in": "query", "schema": { "type": "string" }, "description": "query token" },
+      { "name": "token", "in": "header", "schema": { "type": "string" }, "description": "header token" },
+      { "name": "body", "in": "query", "schema": { "type": "string" }, "description": "a parameter called body" }
+    ],
+    "requestBody": { "required": true, "content": { "application/json": {
+      "schema": { "type": "object", "properties": { "q": { "type": "string" } } } } } },
+    "responses": { "200": { "description": "OK" } } } } } }`
+
+func TestFidelity_CollidingParameterNamesAreDisambiguated(t *testing.T) {
+	tools := toolsByName(t, parseSpec(t, collidingParamSpec))
+	rt := tools["search"]
+	require.NotNil(t, rt)
+
+	props := dig(t, inputSchema(t, rt.Tool), "properties")
+
+	// Every declared parameter is still reachable, under some name.
+	assert.Len(t, props, 4, "3 parameters plus the body, none lost to a collision: %v", keysOf(props))
+
+	// The request body keeps the "body" name; the parameter that wanted it moves.
+	assert.Equal(t, "object", dig(t, props, "body")["type"], "the request body keeps its name")
+	assert.Contains(t, props, "query_body")
+
+	// The two "token" parameters are told apart by location.
+	assert.Contains(t, props, "token")
+	assert.Contains(t, props, "header_token")
+
+	// The wire names are unchanged.
+	byName := map[string]requester.ParamConfig{}
+	for _, cfg := range rt.RouteConfig.MethodConfig.Params {
+		byName[cfg.ArgName] = cfg
+	}
+	assert.Equal(t, "token", byName["header_token"].Name)
+	assert.Equal(t, requester.ParamInHeader, byName["header_token"].In)
+	assert.Equal(t, "body", byName["query_body"].Name)
+	assert.Equal(t, requester.ParamInQuery, byName["query_body"].In)
 }
