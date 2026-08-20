@@ -97,6 +97,52 @@ This approach keeps all related files together and is ideal for local developmen
 
 ---
 
+## 🔑 Authenticating callers and upstreams
+
+Credentials are described once as **security schemes** and then referred to by
+whichever direction uses them:
+
+```yaml
+security_schemes:
+  - id: caller # authenticates the MCP client calling this server
+    type: http
+    scheme: bearer # basic | bearer
+    default_credential: "${AUTO_MCP_DOWNSTREAM_TOKEN}"
+  - id: upstream_key # authenticates this server to the API it proxies
+    type: apiKey
+    in: header # header | query
+    name: X-API-Key
+    default_credential: "${UPSTREAM_API_KEY}"
+
+downstream_security: # client → auto-mcp
+  id: caller
+upstream_security: # auto-mcp → upstream API
+  id: upstream_key
+```
+
+`${VAR}` is read from the environment, so credentials need not be committed to a
+file. A referenced variable that is not set is a startup error rather than an
+empty credential, because an empty credential reaches the upstream as a
+permissions failure that points nowhere near the cause.
+
+Two rules are enforced at startup:
+
+- **A host reachable from outside this machine must authenticate its callers.**
+  `server.host` other than `localhost`/`127.0.0.1`/`::1` requires either
+  `downstream_security` or `oauth.enabled`. The MCP endpoint holds whatever
+  credential the upstream requires, so an open port lends those credentials to
+  anyone who can reach it. `stdio` has no socket and is exempt.
+- **A requirement must have a credential to use**, either its own `credential`,
+  the scheme's `default_credential`, or `passthrough`.
+
+`upstream_security` also accepts `passthrough: true`, which forwards the
+caller's own credential to the upstream instead of one of ours. It never falls
+back to the configured credential: sending the platform's identity on behalf of
+a caller who presented none is the failure that would hide.
+
+The older `endpoint.auth_type` / `endpoint.auth_config` pair still works and is
+used when `upstream_security` is absent.
+
 ## Example config.yaml
 
 ```yaml

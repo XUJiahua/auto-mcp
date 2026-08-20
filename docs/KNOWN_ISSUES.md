@@ -34,20 +34,30 @@ MCP 库已从 `github.com/mark3labs/mcp-go` 换成官方 `github.com/modelcontex
 - 上游调用方的 HTTP 头可以从 `request.Extra.Header` 读到(`mcp.CallToolRequest` =
   `ServerRequest[*CallToolParamsRaw]`)，需要把调用方的头转发给上游时用得上。
 
-## 2. `/mcp` 默认无鉴权，而进程持有全部商户的上游凭证
+## 2. `/mcp` 无鉴权 —— 已解决
 
-`internal/server/handler/http.go`，OAuth 关闭时:
+原问题:OAuth 关闭时 `internal/server/handler/http.go` 是 `mux.Handle("/", mcpHandler)` ——
+`/mcp` 裸奔,而这个进程持有上游所需的凭证,等于把凭证借给任何能连上该端口的人。
 
-```go
-mux.Handle("/", mcpHandler)
-logger.Info("Running without authentication")
-```
+现在照 higress 的形状引入了**两侧分离**的 security 模型(`internal/config/security.go` +
+`internal/security/`):凭证一次性描述为 `security_schemes`(`apiKey` header/query、
+`http` basic/bearer),再由 `downstream_security`(client → 本服务)与
+`upstream_security`(本服务 → 上游)分别引用。凭证支持 `${VAR}` 环境变量插值,
+引用了未设置的变量是启动失败而不是空凭证。
 
-单 spec 本地使用没问题。做成多租户之后，这个进程同时持有**所有**商户的上游地址与
-凭证，一个无鉴权的 `/mcp` 等于任何能连上该端口的人都可以借我们的凭证向商户下单。
+**启动时强制两条**:
+- 绑定地址可从机器外访问(`server.host` 不是 localhost/127.0.0.1/::1)时,必须配
+  `downstream_security` 或开 OAuth,否则启动失败。`stdio` 无监听套接字,豁免。
+- 一个 requirement 必须有可用凭证(自己的 `credential`、scheme 的
+  `default_credential`,或 `passthrough`)。
 
-至少要有其一:静态 bearer；或只监听 loopback、由同机调用方访问。两者都没有时
-多租户不应上线。
+`upstream_security` 支持 `passthrough: true`(把调用方自己的凭证转发给上游)。它**不会**
+回落到配置里的凭证 —— 那等于替一个没出示凭证的调用方送出平台的身份。
+
+旧的 `endpoint.auth_type` / `auth_config` 保持可用,`upstream_security` 缺省时仍走它。
+
+一处代价:`examples/petshop/config/config.yaml` 用的是 `host: 0.0.0.0`(容器里必须如此),
+因此示例现在需要 `AUTO_MCP_DOWNSTREAM_TOKEN`。这是那条强制规则的直接后果。
 
 ## 3. `outputSchema` 无法暴露 —— 已解决
 

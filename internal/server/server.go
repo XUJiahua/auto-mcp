@@ -13,6 +13,7 @@ import (
 	"github.com/brizzai/auto-mcp/internal/logger"
 	"github.com/brizzai/auto-mcp/internal/parser"
 	"github.com/brizzai/auto-mcp/internal/requester"
+	"github.com/brizzai/auto-mcp/internal/security"
 	"github.com/brizzai/auto-mcp/internal/server/handler"
 	"github.com/brizzai/auto-mcp/internal/server/tool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -74,7 +75,7 @@ func NewServer(cfg *config.Config, p parser.Parser, requester *requester.HTTPReq
 	}
 
 	// Initialize handlers
-	srv.handler = handler.NewHandler(srv.auth)
+	srv.handler = handler.NewHandler(srv.auth, security.New(cfg.SecuritySchemes), cfg.DownstreamSecurity)
 	srv.tool = tool.NewHandler(srv.auth != nil)
 
 	if err := srv.setupTools(); err != nil {

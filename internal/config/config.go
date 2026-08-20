@@ -29,6 +29,15 @@ type Config struct {
 	SwaggerFile     string         `mapstructure:"swagger_file"`
 	AdjustmentsFile string         `mapstructure:"adjustments_file"`
 	OAuth           *OAuthConfig   `mapstructure:"oauth"`
+
+	// SecuritySchemes describe the credentials this deployment knows about;
+	// the two requirements below say which direction each is used in.
+	SecuritySchemes []SecurityScheme `mapstructure:"security_schemes"`
+	// DownstreamSecurity authenticates the MCP client calling this server.
+	DownstreamSecurity *SecurityRequirement `mapstructure:"downstream_security"`
+	// UpstreamSecurity authenticates this server to the API it proxies. It
+	// supersedes the endpoint auth_type/auth_config pair when set.
+	UpstreamSecurity *SecurityRequirement `mapstructure:"upstream_security"`
 }
 
 // AuthType represents the type of authentication to use
@@ -250,6 +259,10 @@ func Load() (*Config, error) {
 	// validate swagger file
 	if config.SwaggerFile == "" {
 		return nil, fmt.Errorf("swagger file is required, please adjust the config or pass --swagger-file or AUTO_MCP_SWAGGER_FILE environment variable")
+	}
+
+	if err := config.resolveSecurity(); err != nil {
+		return nil, err
 	}
 
 	if config.OAuth != nil && len(config.OAuth.Scopes) == 1 {

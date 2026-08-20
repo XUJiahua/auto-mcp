@@ -17,7 +17,19 @@ logging:
 
 endpoint:
   base_url: "https://petstore.swagger.io/v2"
-  auth_type: "none"
+
+# A container has to bind 0.0.0.0 to be reachable through a published port, and
+# a reachable MCP endpoint has to be able to tell its callers apart, so a
+# credential is required. Set AUTO_MCP_DOWNSTREAM_TOKEN when running this
+# example; binding host to localhost instead removes the requirement.
+security_schemes:
+  - id: caller
+    type: http
+    scheme: bearer
+    default_credential: "${AUTO_MCP_DOWNSTREAM_TOKEN}"
+
+downstream_security:
+  id: caller
 
 oauth:
   enabled: false
