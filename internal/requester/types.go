@@ -60,10 +60,6 @@ type MethodConfig struct {
 	// Params carries every declared parameter with its location.
 	Params []ParamConfig `json:"params,omitempty"`
 
-	// QueryParams lists query parameter names. Superseded by Params; kept
-	// because it is part of the persisted route config shape.
-	QueryParams []string `json:"query_params,omitempty"`
-
 	// BodyContentType is the media type the spec declared for the request body.
 	// The builder encodes the body to match it, so that the bytes on the wire and
 	// the Content-Type header cannot disagree.

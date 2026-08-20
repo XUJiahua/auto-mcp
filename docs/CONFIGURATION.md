@@ -9,12 +9,10 @@ Auto MCP accepts configuration via **CLI flags**, **environment variables** (pre
 | Select transport                      | `AUTO_MCP_SERVER_MODE`                | `stdio` or `http` or `sse`       |
 | Bind port (SSE)                       | `AUTO_MCP_SERVER_PORT`                | `8080`                           |
 | Upstream base URL                     | `AUTO_MCP_ENDPOINT_BASE_URL`          | `https://petstore.swagger.io/v2` |
-| Authentication type                   | `AUTO_MCP_ENDPOINT_AUTH_TYPE`         | `bearer`                         |
-| Bearer/OAuth token                    | `AUTO_MCP_ENDPOINT_AUTH_CONFIG_TOKEN` | `123456`                         |
 | Extra static header                   | `AUTO_MCP_ENDPOINT_HEADERS_X_CUSTOM`  | `hello`                          |
 | Log level                             | `AUTO_MCP_LOGGING_LEVEL`              | `debug`                          |
 | Path to swagger file                  | `AUTO_MCP_SWAGGER_FILE`               | `/server/swagger.json`           |
-| Path to adjustment file (mcp-builder) | `AUTO_MCP_ADJUSTMENTS_FILE`           | `/server/swagger.json`           |
+| Path to adjustment file (mcp-builder) | `AUTO_MCP_ADJUSTMENT_FILE`            | `/server/adjustments.json`       |
 | Enable OAuth                          | `AUTO_MCP_OAUTH_ENABLED`              | `true`                           |
 | OAuth provider                        | `AUTO_MCP_OAUTH_PROVIDER`             | `github` / `google`              |
 | OAuth client ID                       | `AUTO_MCP_OAUTH_CLIENT_ID`            | `your-client-id`                 |
@@ -32,6 +30,9 @@ CLI shortcuts:
 - `--mode` – overrides the transport.
 - `--swagger-file` – absolute or relative path to the OpenAPI document.
 - `--adjustment-file` - mcp-config-builder output filter/change route descriptions.
+
+> Upstream authentication is configured with `security_schemes` +
+> `upstream_security`; see the section below. There is no `endpoint.auth_type`.
 
 ---
 
@@ -140,8 +141,8 @@ caller's own credential to the upstream instead of one of ours. It never falls
 back to the configured credential: sending the platform's identity on behalf of
 a caller who presented none is the failure that would hide.
 
-The older `endpoint.auth_type` / `endpoint.auth_config` pair still works and is
-used when `upstream_security` is absent.
+An upstream that needs no credential is configured by saying nothing: omit
+`upstream_security`.
 
 ## Example config.yaml
 
@@ -165,7 +166,6 @@ logging:
 
 endpoint:
   base_url: "https://petstore.swagger.io/v2" # Upstream API base URL
-  auth_type: "none" # Auth type: none, basic, bearer, api_key, oauth2
   # auth_config:           # (optional) Auth config map, e.g. {token: "..."}
   # headers:               # (optional) Extra headers map, e.g. {X-Api-Key: "..."}
 

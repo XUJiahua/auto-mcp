@@ -23,39 +23,28 @@ func GetVersionInfo() string {
 }
 
 type Config struct {
-	Server          ServerConfig   `mapstructure:"server"`
-	Logging         LoggingConfig  `mapstructure:"logging"`
-	EndpointConfig  EndpointConfig `mapstructure:"endpoint"`
-	SwaggerFile     string         `mapstructure:"swagger_file"`
-	AdjustmentsFile string         `mapstructure:"adjustments_file"`
-	OAuth           *OAuthConfig   `mapstructure:"oauth"`
+	Server         ServerConfig   `mapstructure:"server"`
+	Logging        LoggingConfig  `mapstructure:"logging"`
+	EndpointConfig EndpointConfig `mapstructure:"endpoint"`
+	SwaggerFile    string         `mapstructure:"swagger_file"`
+	AdjustmentFile string         `mapstructure:"adjustment_file"`
+	OAuth          *OAuthConfig   `mapstructure:"oauth"`
 
 	// SecuritySchemes describe the credentials this deployment knows about;
 	// the two requirements below say which direction each is used in.
 	SecuritySchemes []SecurityScheme `mapstructure:"security_schemes"`
 	// DownstreamSecurity authenticates the MCP client calling this server.
 	DownstreamSecurity *SecurityRequirement `mapstructure:"downstream_security"`
-	// UpstreamSecurity authenticates this server to the API it proxies. It
-	// supersedes the endpoint auth_type/auth_config pair when set.
+	// UpstreamSecurity authenticates this server to the API it proxies.
 	UpstreamSecurity *SecurityRequirement `mapstructure:"upstream_security"`
 }
 
-// AuthType represents the type of authentication to use
-type AuthType string
-
-const (
-	AuthTypeNone   AuthType = "none"
-	AuthTypeBasic  AuthType = "basic"
-	AuthTypeBearer AuthType = "bearer"
-	AuthTypeAPIKey AuthType = "api_key"
-	AuthTypeOAuth2 AuthType = "oauth2"
-)
-
+// EndpointConfig describes the API being proxied. Authentication to it is
+// configured with upstream_security rather than here, so that the credential is
+// described in the same vocabulary as the one callers present.
 type EndpointConfig struct {
-	BaseURL    string            `json:"base_url" mapstructure:"base_url"`
-	AuthType   AuthType          `json:"auth_type" mapstructure:"auth_type"`
-	AuthConfig map[string]string `json:"auth_config" mapstructure:"auth_config"`
-	Headers    map[string]string `json:"headers" mapstructure:"headers"`
+	BaseURL string            `json:"base_url" mapstructure:"base_url"`
+	Headers map[string]string `json:"headers" mapstructure:"headers"`
 }
 
 type ServerMode string
@@ -108,11 +97,7 @@ type OAuthConfig struct {
 func InitFlags() {
 	pflag.String("mode", string(ServerModeSTDIO), "Server mode (stdio|sse|http)")
 	pflag.String("swagger-file", "", "Path to the swagger file")
-	pflag.String("adjustments-file", "", "Path to the adjustments file")
-	// The documentation has always spelled this one in the singular, so both
-	// spellings are accepted rather than breaking either the docs or any script
-	// that already uses the plural.
-	pflag.String("adjustment-file", "", "Path to the adjustments file (alias of --adjustments-file)")
+	pflag.String("adjustment-file", "", "Path to the adjustment file")
 	// Note: no pflag.Parse() here as it's called in main.go
 }
 
@@ -126,9 +111,9 @@ func InitFlags() {
 // flag when it was actually changed, and falls back to its default last.
 func bindFlagsToConfigKeys() error {
 	bindings := map[string]string{
-		"server.mode":      "mode",
-		"swagger_file":     "swagger-file",
-		"adjustments_file": "adjustments-file",
+		"server.mode":     "mode",
+		"swagger_file":    "swagger-file",
+		"adjustment_file": "adjustment-file",
 	}
 	for key, name := range bindings {
 		flag := pflag.CommandLine.Lookup(name)
@@ -153,11 +138,6 @@ func bindFlagsToConfigKeys() error {
 func bindDocumentedEnvKeys() {
 	for _, key := range []string{
 		"endpoint.base_url",
-		"endpoint.auth_config.token",
-		"endpoint.auth_config.username",
-		"endpoint.auth_config.password",
-		"endpoint.auth_config.key",
-		"endpoint.auth_config.header",
 		"oauth.enabled",
 		"oauth.provider",
 		"oauth.client_id",
@@ -190,7 +170,6 @@ func setDefaults() {
 	viper.SetDefault("logging.format", "json")
 	viper.SetDefault("logging.color", true)
 
-	viper.SetDefault("endpoint.auth_type", string(AuthTypeNone))
 }
 
 func Load() (*Config, error) {
@@ -246,11 +225,7 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	// The flags are bound to their config keys, so viper has already applied the
-	// precedence explicit flag > environment > file > default. Only the alias
-	// spelling needs resolving by hand.
-	if pflag.CommandLine.Changed("adjustment-file") {
-		config.AdjustmentsFile = viper.GetString("adjustment-file")
-	}
+	// precedence explicit flag > environment > file > default.
 
 	if !config.Server.Mode.valid() {
 		return nil, fmt.Errorf("unsupported server mode %q, expected one of stdio, sse, http", config.Server.Mode)

@@ -54,7 +54,8 @@ MCP 库已从 `github.com/mark3labs/mcp-go` 换成官方 `github.com/modelcontex
 `upstream_security` 支持 `passthrough: true`(把调用方自己的凭证转发给上游)。它**不会**
 回落到配置里的凭证 —— 那等于替一个没出示凭证的调用方送出平台的身份。
 
-旧的 `endpoint.auth_type` / `auth_config` 保持可用,`upstream_security` 缺省时仍走它。
+`endpoint.auth_type` / `auth_config` 已删除 —— 原型阶段不背兼容包袱,两条并行的鉴权路径
+是最容易腐烂的东西。不需要凭证的上游靠"什么都不配"表达,而不是写 `auth_type: none`。
 
 一处代价:`examples/petshop/config/config.yaml` 用的是 `host: 0.0.0.0`(容器里必须如此),
 因此示例现在需要 `AUTO_MCP_DOWNSTREAM_TOKEN`。这是那条强制规则的直接后果。
@@ -200,3 +201,16 @@ Failed to load configuration: Config File "config" Not Found in "[. /etc/auto-mc
 选择保留扁平命名空间(higress 亦是扁平 + `Position` 标注)而不是像 agentgateway 那样按
 location 分组成 `{body,header,query,path}` 四层:扁平对模型更友好,下游拍平也更自然。
 分组能天然免疫这类冲突,是这个选择的代价,现在用改名 + 检测来补。
+
+## 11. 兼容层清理
+
+原型阶段允许破坏性更新,因此为向后兼容留下的并行路径已删除:
+
+- **`endpoint.auth_type` / `endpoint.auth_config`**(连同 `config.AuthType` 与
+  `HTTPAuthManager` 里那个 switch)。上游鉴权只有 `security_schemes` +
+  `upstream_security` 一条路。两套并行的鉴权实现是最容易腐烂的东西。
+- **`--adjustments-file` 复数拼写**。全线统一为单数:flag `--adjustment-file`、
+  配置键 `adjustment_file`、环境变量 `AUTO_MCP_ADJUSTMENT_FILE`、字段 `AdjustmentFile`。
+  原来是文档单数、flag 复数、环境变量复数,三处不一致。
+- **`MethodConfig.QueryParams`**。已被带 location 的 `Params` 取代,留着只会让"查询参数
+  有几个"这个问题有两个答案。

@@ -23,7 +23,10 @@ The service reads a Swagger (OpenAPI v2) or OpenAPI v3 document, generates route
   - `stdio` (default).
   - `http` - StreamableHttp, newest MCP prototcol.
   - `sse` – self-hosted long-running event source.
-- **Pluggable auth** – bearer token, basic auth, API keys, OAuth2 or no auth.
+- **Auth in both directions** – one vocabulary of security schemes (bearer,
+  basic, API key in a header or query) for authenticating the MCP client calling
+  Auto MCP and for authenticating Auto MCP to the API it proxies, plus OAuth 2.1
+  for callers.
 - **Runtime configuration** – YAML file, CLI flags, or environment variables (prefixed `AUTO_MCP_`).
 
 ---

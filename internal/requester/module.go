@@ -6,14 +6,8 @@ import (
 	"go.uber.org/fx"
 )
 
-// newAuthManager builds the upstream authenticator, preferring the configured
-// security scheme over the older endpoint auth_type when both are present.
-func newAuthManager(cfg *config.Config, endpoint *config.EndpointConfig) AuthManager {
-	manager := NewHTTPAuthManager(endpoint)
-	if cfg.UpstreamSecurity != nil {
-		manager = manager.WithSecurity(security.New(cfg.SecuritySchemes), cfg.UpstreamSecurity)
-	}
-	return manager
+func newAuthManager(cfg *config.Config) AuthManager {
+	return NewAuthManager(security.New(cfg.SecuritySchemes), cfg.UpstreamSecurity)
 }
 
 // Module provides the requester module dependencies

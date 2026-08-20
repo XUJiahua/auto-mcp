@@ -164,35 +164,15 @@ func TestLoad_UpstreamBaseURLComesFromTheEnvironment(t *testing.T) {
 	assert.Equal(t, "https://upstream.example.com", cfg.EndpointConfig.BaseURL)
 }
 
-func TestLoad_UpstreamAuthComesFromTheEnvironment(t *testing.T) {
-	inTempDir(t, "--swagger-file=spec.yaml")
-	t.Setenv("AUTO_MCP_ENDPOINT_AUTH_TYPE", "bearer")
-
-	cfg, err := Load()
-	require.NoError(t, err)
-
-	assert.Equal(t, AuthTypeBearer, cfg.EndpointConfig.AuthType)
-}
-
-// docs/CONFIGURATION.md and README.md have always documented --adjustment-file
-// in the singular, while the registered flag was the plural. Every documented
-// invocation failed with "unknown flag", so both spellings are accepted.
-func TestLoad_DocumentedAdjustmentFlagSpellingWorks(t *testing.T) {
+// The adjustment file path is spelled the same way everywhere: the flag, the
+// config key and the environment variable all use the singular.
+func TestLoad_AdjustmentFileFlag(t *testing.T) {
 	inTempDir(t, "--swagger-file=spec.yaml", "--adjustment-file=adj.yaml")
 
 	cfg, err := Load()
 	require.NoError(t, err)
 
-	assert.Equal(t, "adj.yaml", cfg.AdjustmentsFile)
-}
-
-func TestLoad_PluralAdjustmentsFlagStillWorks(t *testing.T) {
-	inTempDir(t, "--swagger-file=spec.yaml", "--adjustments-file=adj.yaml")
-
-	cfg, err := Load()
-	require.NoError(t, err)
-
-	assert.Equal(t, "adj.yaml", cfg.AdjustmentsFile)
+	assert.Equal(t, "adj.yaml", cfg.AdjustmentFile)
 }
 
 // A misspelled mode used to be silently ignored, leaving the process in

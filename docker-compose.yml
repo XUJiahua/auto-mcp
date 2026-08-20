@@ -10,5 +10,5 @@ services:
       - ${ADJUSTMENTS_FILE_PATH}:/server/config/adjustments.yaml
     environment:
       - AUTO_MCP_SWAGGER_FILE=/server/config/swagger.json
-      - AUTO_MCP_ADJUSTMENTS_FILE=/server/config/adjustments.yaml
+      - AUTO_MCP_ADJUSTMENT_FILE=/server/config/adjustments.yaml
     restart: unless-stopped

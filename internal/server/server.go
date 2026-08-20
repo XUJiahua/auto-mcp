@@ -112,7 +112,7 @@ func (s *Server) setupAuth() error {
 }
 
 func (s *Server) setupTools() error {
-	if err := s.parser.Init(s.config.SwaggerFile, s.config.AdjustmentsFile); err != nil {
+	if err := s.parser.Init(s.config.SwaggerFile, s.config.AdjustmentFile); err != nil {
 		return fmt.Errorf("failed to initialize parser: %w", err)
 	}
 

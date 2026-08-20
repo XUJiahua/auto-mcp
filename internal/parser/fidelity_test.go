@@ -425,7 +425,13 @@ func TestFidelity_DuplicateParameterDeclarationsAreMerged(t *testing.T) {
 	for key, count := range seen {
 		assert.Equal(t, 1, count, "parameter %s recorded %d times", key, count)
 	}
-	assert.Equal(t, []string{"locale"}, rt.RouteConfig.MethodConfig.QueryParams)
+	var queryNames []string
+	for _, cfg := range rt.RouteConfig.MethodConfig.Params {
+		if cfg.In == requester.ParamInQuery {
+			queryNames = append(queryNames, cfg.Name)
+		}
+	}
+	assert.Equal(t, []string{"locale"}, queryNames)
 }
 
 // The request body media type decides how the body is encoded. Declaring

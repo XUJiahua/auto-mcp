@@ -13,6 +13,7 @@ import (
 	"github.com/brizzai/auto-mcp/internal/config"
 	"github.com/brizzai/auto-mcp/internal/parser"
 	"github.com/brizzai/auto-mcp/internal/requester"
+	"github.com/brizzai/auto-mcp/internal/security"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,8 +43,8 @@ func TestNewMCPServer_SemiE2E(t *testing.T) {
 
 	// Build a minimal configuration
 	srvCfg := &config.Config{
-		SwaggerFile:     swaggerPath,
-		AdjustmentsFile: adjustmentPath,
+		SwaggerFile:    swaggerPath,
+		AdjustmentFile: adjustmentPath,
 		EndpointConfig: config.EndpointConfig{
 			BaseURL: "https://petstore.swagger.io/v2", // real API base (won't be hit in this test)
 		},
@@ -62,7 +63,7 @@ func TestNewMCPServer_SemiE2E(t *testing.T) {
 	endpointCfg := &srvCfg.EndpointConfig
 	httpRequester := requester.NewHTTPRequester(requester.HTTPRequesterParams{
 		ServiceConfig: endpointCfg,
-		AuthManager:   requester.NewHTTPAuthManager(endpointCfg),
+		AuthManager:   requester.NewAuthManager(security.New(nil), nil),
 	})
 
 	// Create the MCP server under test
@@ -157,7 +158,7 @@ func TestNewMCPServer_SemiE2E(t *testing.T) {
 		assert.NotContains(t, inventoryTool.RouteConfig.Path, "{", "Inventory endpoint should not have path parameters")
 
 		// There should be no query parameters
-		assert.Empty(t, inventoryTool.RouteConfig.MethodConfig.QueryParams,
+		assert.Empty(t, inventoryTool.RouteConfig.MethodConfig.Params,
 			"Inventory endpoint should not have query parameters")
 	})
 }
@@ -196,8 +197,8 @@ func TestMCPServer_ListTools(t *testing.T) {
 
 	// Build configuration for MCP server
 	srvCfg := &config.Config{
-		SwaggerFile:     swaggerPath,
-		AdjustmentsFile: adjustmentPath,
+		SwaggerFile:    swaggerPath,
+		AdjustmentFile: adjustmentPath,
 		EndpointConfig: config.EndpointConfig{
 			BaseURL: "https://petstore.swagger.io/v2", // real API base (won't be hit in this test)
 		},
@@ -216,7 +217,7 @@ func TestMCPServer_ListTools(t *testing.T) {
 	endpointCfg := &srvCfg.EndpointConfig
 	httpRequester := requester.NewHTTPRequester(requester.HTTPRequesterParams{
 		ServiceConfig: endpointCfg,
-		AuthManager:   requester.NewHTTPAuthManager(endpointCfg),
+		AuthManager:   requester.NewAuthManager(security.New(nil), nil),
 	})
 
 	// Create the MCP server under test
@@ -382,7 +383,7 @@ func TestMCPServer_ContextCancellation(t *testing.T) {
 	endpointCfg := &srvCfg.EndpointConfig
 	httpRequester := requester.NewHTTPRequester(requester.HTTPRequesterParams{
 		ServiceConfig: endpointCfg,
-		AuthManager:   requester.NewHTTPAuthManager(endpointCfg),
+		AuthManager:   requester.NewAuthManager(security.New(nil), nil),
 	})
 
 	// Create the server
@@ -449,7 +450,7 @@ func TestMCPServer_ToolRegistration(t *testing.T) {
 	endpointCfg := &srvCfg.EndpointConfig
 	httpRequester := requester.NewHTTPRequester(requester.HTTPRequesterParams{
 		ServiceConfig: endpointCfg,
-		AuthManager:   requester.NewHTTPAuthManager(endpointCfg),
+		AuthManager:   requester.NewAuthManager(security.New(nil), nil),
 	})
 
 	// Create MCP server with our mock parser

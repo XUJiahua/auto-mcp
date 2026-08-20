@@ -733,8 +733,7 @@ func (p *SwaggerParser) createRouteConfig(path, method string, operation *openap
 	// Record every declared parameter with its location so the request builder
 	// does not have to infer it from the argument name.
 	routeConfig.MethodConfig = requester.MethodConfig{
-		QueryParams: make([]string, 0),
-		Params:      make([]requester.ParamConfig, 0),
+		Params: make([]requester.ParamConfig, 0),
 	}
 
 	specParams := p.operationParameters(routeConfig, operation)
@@ -752,9 +751,6 @@ func (p *SwaggerParser) createRouteConfig(path, method string, operation *openap
 			Explode: value.Explode == nil || *value.Explode,
 		}
 		routeConfig.MethodConfig.Params = append(routeConfig.MethodConfig.Params, cfg)
-		if cfg.In == requester.ParamInQuery {
-			routeConfig.MethodConfig.QueryParams = append(routeConfig.MethodConfig.QueryParams, value.Name)
-		}
 	}
 
 	// Undeclared path placeholders still have to be substituted.

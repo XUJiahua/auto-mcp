@@ -158,7 +158,9 @@ func TestSwaggerParser_GenerateTool(t *testing.T) {
 			Path:   "/api/users/{id}",
 			Method: "GET",
 			MethodConfig: requester.MethodConfig{
-				QueryParams: []string{"include"},
+				Params: []requester.ParamConfig{
+					{Name: "include", In: requester.ParamInQuery, Type: "string", Explode: true},
+				},
 			},
 			Description: "Get user by ID",
 		}
@@ -864,9 +866,15 @@ func TestParseComplexSpecs(t *testing.T) {
 		// Test GET /users
 		if getUsersTool, ok := routeMap["GET /users"]; ok {
 			assert.Equal(t, "get_users", getUsersTool.Tool.Name)
-			assert.Len(t, getUsersTool.RouteConfig.MethodConfig.QueryParams, 2)
-			assert.Contains(t, getUsersTool.RouteConfig.MethodConfig.QueryParams, "page")
-			assert.Contains(t, getUsersTool.RouteConfig.MethodConfig.QueryParams, "limit")
+			var queryNames []string
+			for _, cfg := range getUsersTool.RouteConfig.MethodConfig.Params {
+				if cfg.In == requester.ParamInQuery {
+					queryNames = append(queryNames, cfg.Name)
+				}
+			}
+			assert.Len(t, queryNames, 2)
+			assert.Contains(t, queryNames, "page")
+			assert.Contains(t, queryNames, "limit")
 		} else {
 			t.Error("GET /users route not found")
 		}

@@ -180,15 +180,15 @@ func TestSecurity_PassthroughNeedsNoCredential(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// The pre-existing endpoint auth configuration keeps working untouched.
-func TestSecurity_LegacyEndpointAuthStillWorks(t *testing.T) {
+// An upstream that needs no credential is configured by saying nothing, rather
+// than by naming a "none" auth type.
+func TestSecurity_UpstreamWithoutSecurityIsAllowed(t *testing.T) {
 	inTempDir(t, "--swagger-file=spec.yaml")
-	writeConfig(t, "endpoint:\n  base_url: http://x\n  auth_type: bearer\n  auth_config:\n    token: legacy\n")
+	writeConfig(t, "endpoint:\n  base_url: http://x\n")
 
 	cfg, err := Load()
 	require.NoError(t, err)
 
-	assert.Equal(t, AuthTypeBearer, cfg.EndpointConfig.AuthType)
-	assert.Equal(t, "legacy", cfg.EndpointConfig.AuthConfig["token"])
 	assert.Nil(t, cfg.UpstreamSecurity)
+	assert.Equal(t, "http://x", cfg.EndpointConfig.BaseURL)
 }
