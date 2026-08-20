@@ -37,7 +37,7 @@ AUTO_MCP_SERVER_MODE=stdio
 # Swagger file path
 AUTO_MCP_SWAGGER_FILE=swagger.json
 # Adjustments file path
-AUTO_MCP_ADJUSTMENTS_FILE=adjustments.yaml
+AUTO_MCP_ADJUSTMENT_FILE=adjustments.yaml
 ```
 
 #### Development Environment
@@ -47,7 +47,7 @@ For local development, create a `.env.dev` file:
 ```bash
 # Development configuration
 AUTO_MCP_SWAGGER_FILE=example_swagger.json
-AUTO_MCP_ADJUSTMENTS_FILE=example_adjustments.yaml
+AUTO_MCP_ADJUSTMENT_FILE=example_adjustments.yaml
 ```
 
 ---
@@ -102,7 +102,7 @@ docker run -p 8080:8080 auto-mcp --mode=sse
 docker run -e AUTO_MCP_SWAGGER_FILE=custom.json auto-mcp
 
 # Using a custom adjustments file
-docker run -e AUTO_MCP_ADJUSTMENTS_FILE=adjustments.yaml auto-mcp
+docker run -e AUTO_MCP_ADJUSTMENT_FILE=adjustments.yaml auto-mcp
 
 # Using a custom config file
 docker run -v $(pwd)/config.yaml:/server/config.yaml auto-mcp

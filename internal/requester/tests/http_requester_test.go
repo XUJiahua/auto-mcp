@@ -39,9 +39,7 @@ func TestHTTPRequester(t *testing.T) {
 				Method: "GET",
 			},
 			serviceConfig: &config.EndpointConfig{
-				AuthType:   config.AuthTypeNone,
-				AuthConfig: nil,
-				Headers:    nil,
+				Headers: nil,
 			},
 			timeout: 30 * time.Second,
 			params: map[string]interface{}{
@@ -75,9 +73,7 @@ func TestHTTPRequester(t *testing.T) {
 				Method: "POST",
 			},
 			serviceConfig: &config.EndpointConfig{
-				AuthType:   config.AuthTypeNone,
-				AuthConfig: nil,
-				Headers:    nil,
+				Headers: nil,
 			},
 			timeout: 30 * time.Second,
 			params: map[string]interface{}{
@@ -119,9 +115,7 @@ func TestHTTPRequester(t *testing.T) {
 				Method: "GET",
 			},
 			serviceConfig: &config.EndpointConfig{
-				AuthType:   config.AuthTypeNone,
-				AuthConfig: nil,
-				Headers:    nil,
+				Headers: nil,
 			},
 			timeout: 100 * time.Millisecond,
 			params:  map[string]interface{}{},
@@ -141,9 +135,7 @@ func TestHTTPRequester(t *testing.T) {
 				Method: "GET",
 			},
 			serviceConfig: &config.EndpointConfig{
-				AuthType:   config.AuthTypeNone,
-				AuthConfig: nil,
-				Headers:    map[string]string{"X-Test-Header": "test-value"},
+				Headers: map[string]string{"X-Test-Header": "test-value"},
 			},
 			timeout: 30 * time.Second,
 			params:  map[string]interface{}{},
@@ -171,10 +163,7 @@ func TestHTTPRequester(t *testing.T) {
 			tt.serviceConfig.BaseURL = server.URL
 
 			// Create the requester
-			requester := requester.NewHTTPRequester(requester.HTTPRequesterParams{
-				ServiceConfig: tt.serviceConfig,
-				AuthManager:   &MockAuthManager{},
-			})
+			requester := requester.NewRequester(tt.serviceConfig, &MockAuthManager{})
 
 			// Set timeout
 			requester.SetTimeout(tt.timeout)

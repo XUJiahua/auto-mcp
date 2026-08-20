@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,9 +11,7 @@ import (
 
 	"github.com/brizzai/auto-mcp/internal/config"
 	"github.com/brizzai/auto-mcp/internal/parser"
-	"github.com/brizzai/auto-mcp/internal/requester"
-	"github.com/mark3labs/mcp-go/client"
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -43,8 +40,8 @@ func TestNewMCPServer_SemiE2E(t *testing.T) {
 
 	// Build a minimal configuration
 	srvCfg := &config.Config{
-		SwaggerFile:     swaggerPath,
-		AdjustmentsFile: adjustmentPath,
+		SwaggerFile:    swaggerPath,
+		AdjustmentFile: adjustmentPath,
 		EndpointConfig: config.EndpointConfig{
 			BaseURL: "https://petstore.swagger.io/v2", // real API base (won't be hit in this test)
 		},
@@ -55,22 +52,13 @@ func TestNewMCPServer_SemiE2E(t *testing.T) {
 		},
 	}
 
-	// Parser & adjustments
-	adjuster := parser.NewAdjuster()
-	swaggerParser := parser.NewSwaggerParser(adjuster)
-
-	// HTTP requester (network will not actually be used – it is only needed for tool construction)
-	endpointCfg := &srvCfg.EndpointConfig
-	httpRequester := requester.NewHTTPRequester(requester.HTTPRequesterParams{
-		ServiceConfig: endpointCfg,
-		AuthManager:   requester.NewHTTPAuthManager(endpointCfg),
-	})
-
 	// Create the MCP server under test
-	mcpSrv := NewServer(srvCfg, swaggerParser, httpRequester)
+	mcpSrv := NewServer(srvCfg)
 	require.NotNil(t, mcpSrv, "expected MCP server instance, got nil")
 
-	// Ensure that tools have been loaded according to the adjustments file
+	// Parse the same spec independently to inspect what was registered.
+	swaggerParser := parser.NewSwaggerParser(parser.NewAdjuster())
+	require.NoError(t, swaggerParser.Init(srvCfg.SwaggerFile, srvCfg.AdjustmentFile))
 	tools := swaggerParser.GetRouteTools()
 	assert.NotEmpty(t, tools, "expected route tools to be loaded, got 0")
 
@@ -81,17 +69,17 @@ func TestNewMCPServer_SemiE2E(t *testing.T) {
 
 	// Check for specific routes that should be included
 	expectedRoutes := map[string]string{
-		"POST /pet":                     "post_pet",
-		"PUT /pet":                      "put_pet",
-		"GET /pet/findByStatus":         "get_pet_findbystatus",
-		"GET /pet/{petId}":              "get_pet_petid",
-		"POST /pet/{petId}":             "post_pet_petid",
-		"POST /pet/{petId}/uploadImage": "post_pet_petid_uploadimage",
-		"GET /store/inventory":          "get_store_inventory",
-		"POST /store/order":             "post_store_order",
-		"GET /store/order/{orderId}":    "get_store_order_orderid",
-		"GET /user/logout":              "get_user_logout",
-		"GET /pet/findByTags":           "get_pet_findbytags",
+		"POST /pet":                     "addPet",
+		"PUT /pet":                      "updatePet",
+		"GET /pet/findByStatus":         "findPetsByStatus",
+		"GET /pet/{petId}":              "getPetById",
+		"POST /pet/{petId}":             "updatePetWithForm",
+		"POST /pet/{petId}/uploadImage": "uploadFile",
+		"GET /store/inventory":          "getInventory",
+		"POST /store/order":             "placeOrder",
+		"GET /store/order/{orderId}":    "getOrderById",
+		"GET /user/logout":              "logoutUser",
+		"GET /pet/findByTags":           "findPetsByTags",
 	}
 
 	// Build a map of actual routes for easier testing
@@ -112,16 +100,21 @@ func TestNewMCPServer_SemiE2E(t *testing.T) {
 
 	// Verify specific tool configurations for key endpoints
 	t.Run("Validate findbystatus endpoint", func(t *testing.T) {
-		findByStatusTool, ok := actualToolNameMap["get_pet_findbystatus"]
-		require.True(t, ok, "get_pet_findbystatus tool not found")
+		findByStatusTool, ok := actualToolNameMap["findPetsByStatus"]
+		require.True(t, ok, "findPetsByStatus tool not found")
 
-		// Check that query parameters are correctly defined
-		params := findByStatusTool.Tool.InputSchema.Properties
+		// Check that query parameters are correctly defined. The spec declares
+		// status as an array of enum'd strings; flattening it to a plain string
+		// would make the parameter unserialisable as repeated query keys.
+		params := toolProperties(t, findByStatusTool.Tool)
 		statusParam, hasStatus := params["status"].(map[string]interface{})
-		assert.True(t, hasStatus, "Should have 'status' query parameter")
-		if hasStatus {
-			assert.Equal(t, "string", statusParam["type"], "Status parameter should be a string")
-		}
+		require.True(t, hasStatus, "Should have 'status' query parameter")
+		assert.Equal(t, "array", statusParam["type"], "Status parameter should keep its declared array type")
+		items, hasItems := statusParam["items"].(map[string]interface{})
+		require.True(t, hasItems, "Array parameter should keep its item schema")
+		assert.Equal(t, "string", items["type"])
+		assert.ElementsMatch(t, []interface{}{"available", "pending", "sold"}, items["enum"])
+		assert.Contains(t, toolRequiredNames(t, findByStatusTool.Tool), "status")
 
 		// Check the route configuration
 		assert.Equal(t, "GET", findByStatusTool.RouteConfig.Method)
@@ -129,8 +122,8 @@ func TestNewMCPServer_SemiE2E(t *testing.T) {
 	})
 
 	t.Run("Validate upload image endpoint", func(t *testing.T) {
-		uploadTool, ok := actualToolNameMap["post_pet_petid_uploadimage"]
-		require.True(t, ok, "post_pet_petid_uploadimage tool not found")
+		uploadTool, ok := actualToolNameMap["uploadFile"]
+		require.True(t, ok, "uploadFile tool not found")
 
 		// Test description override specified in the adjustment.yaml
 		assert.Contains(t, uploadTool.Tool.Description,
@@ -146,14 +139,14 @@ func TestNewMCPServer_SemiE2E(t *testing.T) {
 	})
 
 	t.Run("Validate store inventory endpoint", func(t *testing.T) {
-		inventoryTool, ok := actualToolNameMap["get_store_inventory"]
-		require.True(t, ok, "get_store_inventory tool not found")
+		inventoryTool, ok := actualToolNameMap["getInventory"]
+		require.True(t, ok, "getInventory tool not found")
 
 		// This endpoint should have no parameters in its path
 		assert.NotContains(t, inventoryTool.RouteConfig.Path, "{", "Inventory endpoint should not have path parameters")
 
 		// There should be no query parameters
-		assert.Empty(t, inventoryTool.RouteConfig.MethodConfig.QueryParams,
+		assert.Empty(t, inventoryTool.RouteConfig.MethodConfig.Params,
 			"Inventory endpoint should not have query parameters")
 	})
 }
@@ -192,8 +185,8 @@ func TestMCPServer_ListTools(t *testing.T) {
 
 	// Build configuration for MCP server
 	srvCfg := &config.Config{
-		SwaggerFile:     swaggerPath,
-		AdjustmentsFile: adjustmentPath,
+		SwaggerFile:    swaggerPath,
+		AdjustmentFile: adjustmentPath,
 		EndpointConfig: config.EndpointConfig{
 			BaseURL: "https://petstore.swagger.io/v2", // real API base (won't be hit in this test)
 		},
@@ -204,19 +197,8 @@ func TestMCPServer_ListTools(t *testing.T) {
 		},
 	}
 
-	// Parser & adjustments
-	adjuster := parser.NewAdjuster()
-	swaggerParser := parser.NewSwaggerParser(adjuster)
-
-	// HTTP requester (network will not actually be used – it is only needed for tool construction)
-	endpointCfg := &srvCfg.EndpointConfig
-	httpRequester := requester.NewHTTPRequester(requester.HTTPRequesterParams{
-		ServiceConfig: endpointCfg,
-		AuthManager:   requester.NewHTTPAuthManager(endpointCfg),
-	})
-
 	// Create the MCP server under test
-	mcpSrv := NewServer(srvCfg, swaggerParser, httpRequester)
+	mcpSrv := NewServer(srvCfg)
 	require.NotNil(t, mcpSrv, "expected MCP server instance, got nil")
 
 	// Create a context with cancellation for the server
@@ -238,45 +220,33 @@ func TestMCPServer_ListTools(t *testing.T) {
 	defer cancel()
 
 	// Create an SSE client to communicate with the server
-	sseClient, err := client.NewSSEMCPClient(serverAddr)
-	require.NoError(t, err, "Failed to create SSE client")
-
-	// Start the client and initialize it
-	err = sseClient.Start(clientCtx)
-	require.NoError(t, err, "Failed to start client")
-
-	// Initialize the client with the server
-	initReq := mcp.InitializeRequest{}
-	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	initReq.Params.Capabilities = mcp.ClientCapabilities{}
-	initReq.Params.ClientInfo = mcp.Implementation{
-		Name:    "test-client",
-		Version: "1.0.0",
-	}
-
-	initResult, err := sseClient.Initialize(clientCtx, initReq)
-	require.NoError(t, err, "Failed to initialize client")
-	require.NotNil(t, initResult, "Initialize result is nil")
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "auto-mcp-test", Version: "1.0.0"}, nil)
+	session, err := mcpClient.Connect(clientCtx, &mcp.SSEClientTransport{Endpoint: serverAddr}, nil)
+	// Connect performs the initialize handshake, so there is no separate
+	// start/initialize step.
+	require.NoError(t, err, "Failed to connect SSE client")
+	defer func() { _ = session.Close() }()
+	require.NotNil(t, session.InitializeResult(), "Initialize result is nil")
 
 	// Test listing available tools
 	t.Run("List Available Tools", func(t *testing.T) {
-		tools, err := sseClient.ListTools(clientCtx, mcp.ListToolsRequest{})
+		tools, err := session.ListTools(clientCtx, nil)
 		require.NoError(t, err, "Failed to get tools from server")
 		require.NotEmpty(t, tools.Tools, "No tools returned")
 
 		// Expected tool names
 		expectedTools := map[string]bool{
-			"post_pet":                   true,
-			"put_pet":                    true,
-			"get_pet_findbystatus":       true,
-			"get_pet_petid":              true,
-			"post_pet_petid":             true,
-			"post_pet_petid_uploadimage": true,
-			"get_store_inventory":        true,
-			"post_store_order":           true,
-			"get_store_order_orderid":    true,
-			"get_user_logout":            true,
-			"get_pet_findbytags":         true,
+			"addPet":            true,
+			"updatePet":         true,
+			"findPetsByStatus":  true,
+			"getPetById":        true,
+			"updatePetWithForm": true,
+			"uploadFile":        true,
+			"getInventory":      true,
+			"placeOrder":        true,
+			"getOrderById":      true,
+			"logoutUser":        true,
+			"findPetsByTags":    true,
 		}
 
 		// Verify all expected tools exist
@@ -292,21 +262,21 @@ func TestMCPServer_ListTools(t *testing.T) {
 	// Test getting a specific tool's details
 	t.Run("Tool Detail Test", func(t *testing.T) {
 		// Test the upload image endpoint which has a custom description
-		toolName := "post_pet_petid_uploadimage"
+		toolName := "uploadFile"
 
 		// Find the tool in the list of tools
-		var tool mcp.Tool
-		tools, err := sseClient.ListTools(clientCtx, mcp.ListToolsRequest{})
+		var tool *mcp.Tool
+		tools, err := session.ListTools(clientCtx, nil)
 		require.NoError(t, err, "Failed to get tools")
 
-		for _, t := range tools.Tools {
-			if t.Name == toolName {
-				tool = t
+		for _, candidate := range tools.Tools {
+			if candidate.Name == toolName {
+				tool = candidate
 				break
 			}
 		}
 
-		require.NotEmpty(t, tool, "Failed to find tool")
+		require.NotNil(t, tool, "Failed to find tool")
 
 		// Verify the tool details
 		assert.Equal(t, toolName, tool.Name, "Incorrect tool name")
@@ -318,18 +288,14 @@ func TestMCPServer_ListTools(t *testing.T) {
 	// Test calling a tool
 	t.Run("Tool Call Test", func(t *testing.T) {
 		// Test the GET /pet/findByStatus endpoint (it's simple and doesn't require complex data)
-		toolName := "get_pet_findbystatus"
-
-		// Create tool call request
-		request := mcp.CallToolRequest{}
-		request.Params.Name = toolName
-		request.Params.Arguments = map[string]interface{}{
-			"status": "available",
-		}
+		toolName := "findPetsByStatus"
 
 		// We don't expect this to succeed since we're not hitting a real API,
 		// but we want to ensure the request is properly processed by the server
-		_, err := sseClient.CallTool(clientCtx, request)
+		_, err := session.CallTool(clientCtx, &mcp.CallToolParams{
+			Name:      toolName,
+			Arguments: map[string]any{"status": "available"},
+		})
 		// It's okay if this fails with a specific type of error indicating the actual endpoint couldn't be called
 		// We're just testing that the server accepts and processes the request as expected
 		if err != nil {
@@ -388,17 +354,8 @@ func TestMCPServer_ContextCancellation(t *testing.T) {
 		},
 	}
 
-	// Create parser and requester
-	adjuster := parser.NewAdjuster()
-	swaggerParser := parser.NewSwaggerParser(adjuster)
-	endpointCfg := &srvCfg.EndpointConfig
-	httpRequester := requester.NewHTTPRequester(requester.HTTPRequesterParams{
-		ServiceConfig: endpointCfg,
-		AuthManager:   requester.NewHTTPAuthManager(endpointCfg),
-	})
-
 	// Create the server
-	mcpSrv := NewServer(srvCfg, swaggerParser, httpRequester)
+	mcpSrv := NewServer(srvCfg)
 	require.NotNil(t, mcpSrv, "Failed to create MCP server")
 
 	// Create a context with cancellation
@@ -425,66 +382,37 @@ func TestMCPServer_ContextCancellation(t *testing.T) {
 	}
 }
 
-// TestMCPServer_ToolRegistration verifies that tools are correctly registered with the MCP server
-func TestMCPServer_ToolRegistration(t *testing.T) {
-	// Define a simple tool for testing
-	testTool := mcp.NewTool("test_tool", mcp.WithDescription("Test tool"))
+// toolProperties reads a tool's declared arguments. The SDK types InputSchema as
+// `any` so that a server can publish a schema it assembled itself.
+func toolProperties(t *testing.T, tool *mcp.Tool) map[string]any {
+	t.Helper()
+	schema, ok := tool.InputSchema.(map[string]any)
+	require.True(t, ok, "tool %s inputSchema is not a map: %#v", tool.Name, tool.InputSchema)
+	props, ok := schema["properties"].(map[string]any)
+	require.True(t, ok, "tool %s has no properties", tool.Name)
+	return props
+}
 
-	// Create a mock parser that always returns our test tool
-	mockParser := &mockParser{
-		tools: []*parser.RouteTool{
-			{
-				RouteConfig: &requester.RouteConfig{
-					Path:   "/test",
-					Method: "GET",
-				},
-				Tool: testTool,
-			},
-		},
+// toolRequiredNames reads a tool's required argument names.
+func toolRequiredNames(t *testing.T, tool *mcp.Tool) []string {
+	t.Helper()
+	schema, ok := tool.InputSchema.(map[string]any)
+	require.True(t, ok, "tool %s inputSchema is not a map", tool.Name)
+	switch required := schema["required"].(type) {
+	case nil:
+		return nil
+	case []string:
+		return required
+	case []any:
+		out := make([]string, 0, len(required))
+		for _, item := range required {
+			if name, ok := item.(string); ok {
+				out = append(out, name)
+			}
+		}
+		return out
+	default:
+		t.Fatalf("tool %s required is %T", tool.Name, schema["required"])
+		return nil
 	}
-
-	// Create a minimal configuration
-	srvCfg := &config.Config{
-		EndpointConfig: config.EndpointConfig{
-			BaseURL: "http://example.com",
-		},
-		Server: config.ServerConfig{
-			Mode: config.ServerModeSTDIO,
-		},
-	}
-
-	// Create HTTP requester
-	endpointCfg := &srvCfg.EndpointConfig
-	httpRequester := requester.NewHTTPRequester(requester.HTTPRequesterParams{
-		ServiceConfig: endpointCfg,
-		AuthManager:   requester.NewHTTPAuthManager(endpointCfg),
-	})
-
-	// Create MCP server with our mock parser
-	mcpSrv := NewServer(srvCfg, mockParser, httpRequester)
-	require.NotNil(t, mcpSrv, "Failed to create MCP server")
-
-	// Since we can't directly access the tools registered in the MCP server,
-	// we can use reflection or just verify that the server was created successfully
-	// and our Init method was called, which shows the tools were processed
-	assert.True(t, mockParser.initCalled, "Parser Init method should have been called")
-}
-
-// mockParser implements the parser.Parser interface for testing
-type mockParser struct {
-	tools      []*parser.RouteTool
-	initCalled bool
-}
-
-func (m *mockParser) Init(openAPISpec string, adjustmentsFile string) error {
-	m.initCalled = true
-	return nil
-}
-
-func (m *mockParser) ParseReader(reader io.Reader) error {
-	return nil
-}
-
-func (m *mockParser) GetRouteTools() []*parser.RouteTool {
-	return m.tools
 }

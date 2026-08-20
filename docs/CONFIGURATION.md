@@ -1,5 +1,8 @@
 # ⚙️ Configuration
 
+> 本文是配置项参考。想按任务读（怎么跑起来、怎么加 API、怎么排错），
+> 看 [USAGE.md](USAGE.md)。
+
 ## Configuration Options
 
 Auto MCP accepts configuration via **CLI flags**, **environment variables** (prefix `AUTO_MCP_`), or an optional `config.yaml`. In containerized deployments environment variables are the most convenient.
@@ -9,12 +12,10 @@ Auto MCP accepts configuration via **CLI flags**, **environment variables** (pre
 | Select transport                      | `AUTO_MCP_SERVER_MODE`                | `stdio` or `http` or `sse`       |
 | Bind port (SSE)                       | `AUTO_MCP_SERVER_PORT`                | `8080`                           |
 | Upstream base URL                     | `AUTO_MCP_ENDPOINT_BASE_URL`          | `https://petstore.swagger.io/v2` |
-| Authentication type                   | `AUTO_MCP_ENDPOINT_AUTH_TYPE`         | `bearer`                         |
-| Bearer/OAuth token                    | `AUTO_MCP_ENDPOINT_AUTH_CONFIG_TOKEN` | `123456`                         |
 | Extra static header                   | `AUTO_MCP_ENDPOINT_HEADERS_X_CUSTOM`  | `hello`                          |
 | Log level                             | `AUTO_MCP_LOGGING_LEVEL`              | `debug`                          |
 | Path to swagger file                  | `AUTO_MCP_SWAGGER_FILE`               | `/server/swagger.json`           |
-| Path to adjustment file (mcp-builder) | `AUTO_MCP_ADJUSTMENTS_FILE`           | `/server/swagger.json`           |
+| Path to adjustment file (mcp-builder) | `AUTO_MCP_ADJUSTMENT_FILE`            | `/server/adjustments.json`       |
 | Enable OAuth                          | `AUTO_MCP_OAUTH_ENABLED`              | `true`                           |
 | OAuth provider                        | `AUTO_MCP_OAUTH_PROVIDER`             | `github` / `google`              |
 | OAuth client ID                       | `AUTO_MCP_OAUTH_CLIENT_ID`            | `your-client-id`                 |
@@ -32,6 +33,9 @@ CLI shortcuts:
 - `--mode` – overrides the transport.
 - `--swagger-file` – absolute or relative path to the OpenAPI document.
 - `--adjustment-file` - mcp-config-builder output filter/change route descriptions.
+
+> Upstream authentication is configured with `security_schemes` +
+> `upstream_security`; see the section below. There is no `endpoint.auth_type`.
 
 ---
 
@@ -97,6 +101,245 @@ This approach keeps all related files together and is ideal for local developmen
 
 ---
 
+## ✅ Documents must conform
+
+A document is validated against the OpenAPI specification at startup and refused
+if it does not conform, with the reason:
+
+```
+OpenAPI document does not conform to the specification: invalid components:
+schema "Address": extra sibling fields: [exampleSetFlag types]
+```
+
+Refusing is the point. A non-conformant construct rarely fails loudly — it simply
+goes unread. One real 425 KiB document declared types with a `types` key, which
+belongs to swagger-core's Java model rather than to OpenAPI, for 220 of its 854
+properties; loading it would publish a quarter of that API with no types at all
+and say nothing about it.
+
+Pattern validation is not part of this check. OpenAPI mandates ECMA-262 regular
+expressions, which permit lookahead, and Go's regexp engine does not implement it.
+A specification using lookahead is correct, so refusing it would reject a valid
+document over a limitation of this implementation.
+
+## 🗂️ Serving several APIs from one process
+
+One `swagger_file` at the top level is the single-service form: its endpoint stays
+at `/mcp`, and `stdio` works because there is only one thing to talk to.
+
+Several APIs are listed under `services`, each becoming its own MCP endpoint at
+`/mcp/{name}`:
+
+```yaml
+security_schemes:
+  - id: hotel_key
+    type: apiKey
+    in: header
+    name: X-API-Key
+    default_credential: "${HOTEL_KEY}"
+  - id: flight_key
+    type: apiKey
+    in: header
+    name: X-API-Key
+    default_credential: "${FLIGHT_KEY}"
+
+services:
+  - name: hotel # served at /mcp/hotel
+    swagger_file: hotel.yaml
+    adjustment_file: hotel-adjustments.yaml
+    endpoint:
+      base_url: https://hotel.example.com
+    upstream_security:
+      id: hotel_key
+  - name: flight # served at /mcp/flight
+    swagger_file: flight.yaml
+    endpoint:
+      base_url: https://flight.example.com
+    upstream_security:
+      id: flight_key
+```
+
+Each service gets its own document, its own adjustments, its own address and its
+own credential. Nothing is shared but the listener and the front-door
+authentication, so one upstream's credential cannot reach another's endpoint.
+
+Security schemes stay global because a scheme describes how a credential is
+carried, not which upstream it belongs to; the same scheme can be referenced by
+several services with different credentials.
+
+A few rules:
+
+- The name is a route segment, so it must be a single path segment
+  (`[a-zA-Z0-9][a-zA-Z0-9_-]*`). Names must be unique, and every service must be
+  named once more than one is configured.
+- A route naming no configured service is a **404**, not an empty tool list: a
+  typo in the address must not look like a service with nothing in it.
+- `stdio` serves a single service. It speaks to one client over one pipe, so
+  there is no address to tell services apart by.
+
+### Dropping in a service directory
+
+`services_dir` is scanned for subdirectories, each becoming a service named after
+itself. Adding an API then means adding a directory rather than editing
+configuration:
+
+```
+services/
+  hotel/
+    openapi.yaml      # or .yml/.json, or swagger.*
+    service.yaml      # optional: endpoint, upstream_security, adjustment_file
+    adjustment.yaml   # optional, picked up without being named
+  flight/
+    openapi.json
+```
+
+```yaml
+services_dir: services
+```
+
+`service.yaml` carries what the document cannot — where to send the requests and
+which credential to use:
+
+```yaml
+endpoint:
+  base_url: https://hotel.example.com
+upstream_security:
+  id: hotel_key
+```
+
+It cannot set the name or the document path: those come from the directory, and a
+file able to rename its own directory would make the route depend on two places
+at once. Discovered and explicitly listed services combine; a name declared in
+both is an error.
+
+A directory without an OpenAPI document is an error rather than a skip, because
+skipping would make a misnamed document look like a service with no tools.
+
+### Reloading without a restart
+
+`SIGHUP` rescans `services_dir` and brings the running server in line with it:
+
+```bash
+kill -HUP $(pgrep auto-mcp)
+```
+
+Existing services are updated in place, keeping their `mcp.Server`, so **open
+sessions stay connected** and receive `notifications/tools/list_changed` as tools
+are added or removed. That is the protocol's own answer to a changing tool set,
+so a reload neither disconnects clients nor leaves them holding a list that no
+longer exists.
+
+A reload that cannot be completed changes nothing: every service is rebuilt
+before any of them is swapped in, so a spec that stopped parsing leaves a process
+that was serving correctly still serving. The failure is logged.
+
+### Knowing what the schemas cost
+
+A tool's `inputSchema` travels to the client on every `tools/list` and lands in a
+model's context, so its size is a running cost. It is reported as each service is
+registered:
+
+```
+Registered service {"route": "/mcp", "tools": 20, "schema_bytes": 5517,
+                    "largest_tool": "addPet", "largest_tool_bytes": 610}
+```
+
+An optional limit refuses a tool whose schema is larger than a deployment is
+willing to carry:
+
+```yaml
+max_tool_schema_kib: 64 # 0, the default, means no limit
+```
+
+It is off by default because a large schema is a cost rather than a fault, and
+the point at which it becomes unacceptable belongs to the deployment rather than
+to a number chosen here. The sizes are reported either way, so the cost is
+visible without having to pick a threshold.
+
+The limit is checked while the tools are built, so a pathological document is
+refused at startup rather than at the first call — and since a reload builds
+everything before swapping anything in, a spec that grew past the limit cannot
+take down a process that is already serving.
+
+## ✂️ Shaping upstream responses
+
+The adjustment file already selects routes and rewrites descriptions; it also
+carries per-route response templates. A whole upstream response is usually much
+larger and noisier than the part a caller needs — pagination metadata, internal
+trace ids, dozens of null fields — and all of it lands in a model's context.
+
+```yaml
+responses:
+  - path: /api/hotel
+    updates:
+      - method: GET
+        prepend_body: "Hotel: "
+        body: "{{ .bussinessResponse.hotelName }} ({{ .bussinessResponse.starRate }} stars)"
+        append_body: ""
+        error_body: "upstream refused: {{ .returnMsg }}"
+```
+
+`body` is a Go template evaluated against the parsed JSON response.
+`prepend_body` and `append_body` wrap the result and work with or without a
+`body` template. `error_body` replaces `body` when the upstream reports a
+failure, since the fields that explain a failure are rarely the ones that carry
+a result.
+
+A template that cannot be applied — malformed syntax, a response that is not
+JSON, a reference to a field that is not there — leaves the response untouched
+and logs why. Discarding the response would discard the only evidence of what
+the upstream actually said.
+
+When a template is configured the result carries no `structuredContent`: the
+template states what the caller should see, and sending the untrimmed payload
+alongside it would put back exactly what was removed.
+
+## 🔑 Authenticating callers and upstreams
+
+Credentials are described once as **security schemes** and then referred to by
+whichever direction uses them:
+
+```yaml
+security_schemes:
+  - id: caller # authenticates the MCP client calling this server
+    type: http
+    scheme: bearer # basic | bearer
+    default_credential: "${AUTO_MCP_DOWNSTREAM_TOKEN}"
+  - id: upstream_key # authenticates this server to the API it proxies
+    type: apiKey
+    in: header # header | query
+    name: X-API-Key
+    default_credential: "${UPSTREAM_API_KEY}"
+
+downstream_security: # client → auto-mcp
+  id: caller
+upstream_security: # auto-mcp → upstream API
+  id: upstream_key
+```
+
+`${VAR}` is read from the environment, so credentials need not be committed to a
+file. A referenced variable that is not set is a startup error rather than an
+empty credential, because an empty credential reaches the upstream as a
+permissions failure that points nowhere near the cause.
+
+Two rules are enforced at startup:
+
+- **A host reachable from outside this machine must authenticate its callers.**
+  `server.host` other than `localhost`/`127.0.0.1`/`::1` requires either
+  `downstream_security` or `oauth.enabled`. The MCP endpoint holds whatever
+  credential the upstream requires, so an open port lends those credentials to
+  anyone who can reach it. `stdio` has no socket and is exempt.
+- **A requirement must have a credential to use**, either its own `credential`,
+  the scheme's `default_credential`, or `passthrough`.
+
+`upstream_security` also accepts `passthrough: true`, which forwards the
+caller's own credential to the upstream instead of one of ours. It never falls
+back to the configured credential: sending the platform's identity on behalf of
+a caller who presented none is the failure that would hide.
+
+An upstream that needs no credential is configured by saying nothing: omit
+`upstream_security`.
+
 ## Example config.yaml
 
 ```yaml
@@ -119,7 +362,6 @@ logging:
 
 endpoint:
   base_url: "https://petstore.swagger.io/v2" # Upstream API base URL
-  auth_type: "none" # Auth type: none, basic, bearer, api_key, oauth2
   # auth_config:           # (optional) Auth config map, e.g. {token: "..."}
   # headers:               # (optional) Extra headers map, e.g. {X-Api-Key: "..."}
 

@@ -10,8 +10,8 @@ import (
 	"github.com/brizzai/auto-mcp/internal/models"
 	"github.com/brizzai/auto-mcp/internal/requester"
 	"github.com/getkin/kin-openapi/openapi3"
-	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestExtractPathParams(t *testing.T) {
@@ -158,7 +158,9 @@ func TestSwaggerParser_GenerateTool(t *testing.T) {
 			Path:   "/api/users/{id}",
 			Method: "GET",
 			MethodConfig: requester.MethodConfig{
-				QueryParams: []string{"include"},
+				Params: []requester.ParamConfig{
+					{Name: "include", In: requester.ParamInQuery, Type: "string", Explode: true},
+				},
 			},
 			Description: "Get user by ID",
 		}
@@ -168,13 +170,13 @@ func TestSwaggerParser_GenerateTool(t *testing.T) {
 		assert.Contains(t, tool.Description, "Get user by ID")
 
 		// Check that path parameter is required
-		assert.Contains(t, tool.InputSchema.Required, "id")
+		assert.Contains(t, toolRequired(t, tool), "id")
 
 		// Verify properties exist
-		_, hasID := tool.InputSchema.Properties["id"]
+		_, hasID := dig(t, inputSchema(t, tool), "properties")["id"]
 		assert.True(t, hasID, "Tool should have 'id' property")
 
-		_, hasInclude := tool.InputSchema.Properties["include"]
+		_, hasInclude := dig(t, inputSchema(t, tool), "properties")["include"]
 		assert.True(t, hasInclude, "Tool should have 'include' property")
 	})
 
@@ -191,12 +193,12 @@ func TestSwaggerParser_GenerateTool(t *testing.T) {
 		assert.Contains(t, tool.Description, "Create user")
 
 		// Check that the body property exists
-		bodyProp, ok := tool.InputSchema.Properties["body"].(map[string]interface{})
+		bodyProp, ok := dig(t, inputSchema(t, tool), "properties")["body"].(map[string]interface{})
 		assert.True(t, ok, "Body should be a map")
 		assert.Equal(t, "object", bodyProp["type"])
 
 		// Log the actual required array for debugging
-		t.Logf("Top-level required: %+v", tool.InputSchema.Required)
+		t.Logf("Top-level required: %+v", toolRequired(t, tool))
 		// Do NOT assert 'body' is in required, as MCP does not add it
 
 		// Verify body properties exist
@@ -238,32 +240,31 @@ func TestSwaggerParser_GenerateTool(t *testing.T) {
 func TestSwaggerParser_ProcessOperations(t *testing.T) {
 	// Create a minimal OpenAPI spec
 	openapiSpec := []byte(`{
-		"openapi": "3.0.0",
-		"info": {
-			"title": "Test API",
-			"version": "1.0.0"
-		},
-		"paths": {
-			"/users": {
-				"get": {
-					"summary": "List users",
-					"description": "Get all users",
-					"responses": {
-						"200": {
-							"description": "Successful response",
-							"content": {
-								"application/json": {
-									"schema": {
-										"type": "array",
-										"items": {
-											"type": "object",
-											"properties": {
-												"id": {
-													"type": "string"
-												},
-												"name": {
-													"type": "string"
-												}
+	"openapi": "3.0.0",
+	"info": {
+		"title": "Test API",
+		"version": "1.0.0"
+	},
+	"paths": {
+		"/users": {
+			"get": {
+				"summary": "List users",
+				"description": "Get all users",
+				"responses": {
+					"200": {
+						"description": "Successful response",
+						"content": {
+							"application/json": {
+								"schema": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"id": {
+												"type": "string"
+											},
+											"name": {
+												"type": "string"
 											}
 										}
 									}
@@ -271,99 +272,123 @@ func TestSwaggerParser_ProcessOperations(t *testing.T) {
 							}
 						}
 					}
-				},
-				"post": {
-					"summary": "Create user",
-					"description": "Create a new user",
-					"requestBody": {
-						"required": true,
-						"content": {
-							"application/json": {
-								"schema": {
-									"type": "object",
-									"properties": {
-										"name": {
-											"type": "string",
-											"description": "User name"
-										},
-										"email": {
-											"type": "string",
-											"description": "User email",
-											"format": "email"
-										}
+				}
+			},
+			"post": {
+				"summary": "Create user",
+				"description": "Create a new user",
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"properties": {
+									"name": {
+										"type": "string",
+										"description": "User name"
 									},
-									"required": ["name", "email"]
-								}
+									"email": {
+										"type": "string",
+										"description": "User email",
+										"format": "email"
+									}
+								},
+								"required": [
+									"name",
+									"email"
+								]
 							}
 						}
 					}
+				},
+				"responses": {
+					"201": {
+						"description": "Created"
+					}
+				}
+			}
+		},
+		"/users/{id}": {
+			"get": {
+				"summary": "Get user",
+				"description": "Get user by ID",
+				"parameters": [
+					{
+						"name": "id",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "OK"
+					}
 				}
 			},
-			"/users/{id}": {
-				"get": {
-					"summary": "Get user",
-					"description": "Get user by ID",
-					"parameters": [
-						{
-							"name": "id",
-							"in": "path",
-							"required": true,
-							"schema": {
-								"type": "string"
-							}
-						}
-					]
-				},
-				"put": {
-					"summary": "Update user",
-					"description": "Update an existing user",
-					"parameters": [
-						{
-							"name": "id",
-							"in": "path",
-							"required": true,
-							"schema": {
-								"type": "string"
-							}
-						}
-					],
-					"requestBody": {
+			"put": {
+				"summary": "Update user",
+				"description": "Update an existing user",
+				"parameters": [
+					{
+						"name": "id",
+						"in": "path",
 						"required": true,
-						"content": {
-							"application/json": {
-								"schema": {
-									"type": "object",
-									"properties": {
-										"name": {
-											"type": "string"
-										},
-										"email": {
-											"type": "string",
-											"format": "email"
-										}
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"properties": {
+									"name": {
+										"type": "string"
+									},
+									"email": {
+										"type": "string",
+										"format": "email"
 									}
 								}
 							}
 						}
 					}
 				},
-				"delete": {
-					"summary": "Delete user",
-					"description": "Delete a user",
-					"parameters": [
-						{
-							"name": "id",
-							"in": "path",
-							"required": true,
-							"schema": {
-								"type": "string"
-							}
+				"responses": {
+					"200": {
+						"description": "OK"
+					}
+				}
+			},
+			"delete": {
+				"summary": "Delete user",
+				"description": "Delete a user",
+				"parameters": [
+					{
+						"name": "id",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "string"
 						}
-					]
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "OK"
+					}
 				}
 			}
 		}
-	}`)
+	}
+}`)
 
 	adjuster := NewAdjuster()
 	parser := NewSwaggerParser(adjuster)
@@ -405,15 +430,15 @@ func TestSwaggerParser_ProcessOperations(t *testing.T) {
 	assert.Contains(t, postTool.Tool.Description, "Create a new user")
 
 	// Check body schema
-	bodyProp, ok := postTool.Tool.InputSchema.Properties["body"].(map[string]interface{})
+	bodyProp, ok := dig(t, inputSchema(t, postTool.Tool), "properties")["body"].(map[string]interface{})
 	assert.True(t, ok, "POST tool should have a body property")
 
 	// Check that the body property exists
 	assert.Equal(t, "object", bodyProp["type"])
 
 	// Check that body is in the required fields (if present)
-	if postTool.Tool.InputSchema.Required != nil {
-		assert.Contains(t, postTool.Tool.InputSchema.Required, "body")
+	if required := toolRequired(t, postTool.Tool); required != nil {
+		assert.Contains(t, required, "body")
 	}
 
 	// Verify body properties exist
@@ -518,22 +543,18 @@ func TestAddBodyParameter_ContentTypes(t *testing.T) {
 			Method: "POST",
 		}
 
-		var opts []mcp.ToolOption
-		parser.addBodyParameter(route, &opts)
+		bodyProp, _ := parser.bodyParameter(route, parser.findOperation(route))
+		require.NotNil(t, bodyProp, "Should have produced a body schema")
 
-		assert.Len(t, opts, 1, "Should have added 1 body option")
-
-		tool := mcp.NewTool("test", opts...)
-		bodyProp, ok := tool.InputSchema.Properties["body"].(map[string]interface{})
-		assert.True(t, ok, "Should have a body property")
-
-		props, ok := bodyProp["properties"].(map[string]interface{})
+		props, ok := bodyProp["properties"].(map[string]any)
 		assert.True(t, ok, "Body should have properties")
 
-		// Log the actual structure for debugging
+		// One media type is chosen and its schema used as-is. Merging the
+		// properties of every declared media type into one body, which is what
+		// used to happen, invents a shape no content type actually accepts.
 		t.Logf("Body properties: %+v", props)
-		_, hasXmlField := props["xmlField"]
-		assert.True(t, hasXmlField, "Should have parsed the XML schema")
+		assert.Contains(t, props, "jsonField", "the preferred media type's schema is used")
+		assert.NotContains(t, props, "xmlField", "schemas from other media types are not merged in")
 	})
 
 	// Test with only XML content type
@@ -543,16 +564,10 @@ func TestAddBodyParameter_ContentTypes(t *testing.T) {
 			Method: "POST",
 		}
 
-		var opts []mcp.ToolOption
-		parser.addBodyParameter(route, &opts)
+		bodyProp, _ := parser.bodyParameter(route, parser.findOperation(route))
+		require.NotNil(t, bodyProp, "Should have produced a body schema")
 
-		assert.Len(t, opts, 1, "Should have added 1 body option")
-
-		tool := mcp.NewTool("test", opts...)
-		bodyProp, ok := tool.InputSchema.Properties["body"].(map[string]interface{})
-		assert.True(t, ok, "Should have a body property")
-
-		props, ok := bodyProp["properties"].(map[string]interface{})
+		props, ok := bodyProp["properties"].(map[string]any)
 		assert.True(t, ok, "Body should have properties")
 
 		// Should have xmlField
@@ -602,44 +617,49 @@ func TestParseOpenAPISpecs(t *testing.T) {
 		{
 			name: "Valid OpenAPI 3.0 spec",
 			input: `{
-				"openapi": "3.0.0",
-				"info": {
-					"title": "Test API",
-					"version": "1.0.0"
-				},
-				"paths": {
-					"/users/{id}": {
-						"post": {
-							"summary": "Create user",
-							"parameters": [
-								{
-									"name": "id",
-									"in": "path",
-									"required": true,
-									"schema": {
-										"type": "string"
-									}
-								}
-							],
-							"requestBody": {
-								"required": true,
-								"content": {
-									"application/json": {
-										"schema": {
-											"type": "object",
-											"properties": {
-												"name": {
-													"type": "string"
-												}
-											}
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			}`,
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Test API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/users/{id}": {
+      "post": {
+        "summary": "Create user",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    }
+  }
+}`,
 			wantErr: false,
 			validate: func(t *testing.T, p *SwaggerParser) {
 				tools := p.GetRouteTools()
@@ -773,87 +793,102 @@ func TestParseOpenAPISpecs(t *testing.T) {
 func TestParseComplexSpecs(t *testing.T) {
 	// Test with a more complex OpenAPI 3.0 spec
 	complexSpec := `{
-		"openapi": "3.0.0",
-		"info": {
-			"title": "Complex API",
-			"version": "1.0.0"
-		},
-		"paths": {
-			"/users": {
-				"get": {
-					"summary": "List users",
-					"parameters": [
-						{
-							"name": "page",
-							"in": "query",
-							"schema": {
-								"type": "integer"
-							}
-						},
-						{
-							"name": "limit",
-							"in": "query",
-							"schema": {
-								"type": "integer"
-							}
-						}
-					]
-				},
-				"post": {
-					"summary": "Create user",
-					"requestBody": {
-						"required": true,
-						"content": {
-							"application/json": {
-								"schema": {
-									"type": "object",
-									"properties": {
-										"name": {
-											"type": "string"
-										},
-										"email": {
-											"type": "string"
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			},
-			"/users/{id}/files": {
-				"post": {
-					"summary": "Upload user file",
-					"parameters": [
-						{
-							"name": "id",
-							"in": "path",
-							"required": true,
-							"schema": {
-								"type": "string"
-							}
-						}
-					],
-					"requestBody": {
-						"required": true,
-						"content": {
-							"multipart/form-data": {
-								"schema": {
-									"type": "object",
-									"properties": {
-										"file": {
-											"type": "string",
-											"format": "binary"
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}`
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Complex API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/users": {
+      "get": {
+        "summary": "List users",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create user",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "email": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/users/{id}/files": {
+      "post": {
+        "summary": "Upload user file",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    }
+  }
+}`
 
 	t.Run("Complex OpenAPI 3.0 spec", func(t *testing.T) {
 		adjuster := NewAdjuster()
@@ -874,9 +909,15 @@ func TestParseComplexSpecs(t *testing.T) {
 		// Test GET /users
 		if getUsersTool, ok := routeMap["GET /users"]; ok {
 			assert.Equal(t, "get_users", getUsersTool.Tool.Name)
-			assert.Len(t, getUsersTool.RouteConfig.MethodConfig.QueryParams, 2)
-			assert.Contains(t, getUsersTool.RouteConfig.MethodConfig.QueryParams, "page")
-			assert.Contains(t, getUsersTool.RouteConfig.MethodConfig.QueryParams, "limit")
+			var queryNames []string
+			for _, cfg := range getUsersTool.RouteConfig.MethodConfig.Params {
+				if cfg.In == requester.ParamInQuery {
+					queryNames = append(queryNames, cfg.Name)
+				}
+			}
+			assert.Len(t, queryNames, 2)
+			assert.Contains(t, queryNames, "page")
+			assert.Contains(t, queryNames, "limit")
 		} else {
 			t.Error("GET /users route not found")
 		}
@@ -884,7 +925,9 @@ func TestParseComplexSpecs(t *testing.T) {
 		// Test POST /users
 		if postUsersTool, ok := routeMap["POST /users"]; ok {
 			assert.Equal(t, "post_users", postUsersTool.Tool.Name)
-			assert.Equal(t, "application/json", postUsersTool.RouteConfig.Headers["Content-Type"])
+			// The media type is recorded so the builder can encode to match it;
+			// the Content-Type header is set from the encoding actually performed.
+			assert.Equal(t, "application/json", postUsersTool.RouteConfig.MethodConfig.BodyContentType)
 		} else {
 			t.Error("POST /users route not found")
 		}
@@ -903,34 +946,54 @@ func TestParseComplexSpecs(t *testing.T) {
 func TestSwaggerParserWithAdjustments(t *testing.T) {
 	// Create a test OpenAPI spec with multiple endpoints
 	openapiSpec := []byte(`{
-		"openapi": "3.0.0",
-		"info": {
-			"title": "Test API",
-			"version": "1.0.0"
-		},
-		"paths": {
-			"/users": {
-				"get": {
-					"summary": "List users",
-					"description": "Get all users"
-				},
-				"post": {
-					"summary": "Create user",
-					"description": "Create a new user"
-				}
-			},
-			"/orders": {
-				"get": {
-					"summary": "List orders",
-					"description": "Get all orders"
-				},
-				"post": {
-					"summary": "Create order",
-					"description": "Create a new order"
-				}
-			}
-		}
-	}`)
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Test API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/users": {
+      "get": {
+        "summary": "List users",
+        "description": "Get all users",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create user",
+        "description": "Create a new user",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/orders": {
+      "get": {
+        "summary": "List orders",
+        "description": "Get all orders",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create order",
+        "description": "Create a new order",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    }
+  }
+}`)
 
 	t.Run("With route filtering", func(t *testing.T) {
 		// Create adjuster that only allows specific routes

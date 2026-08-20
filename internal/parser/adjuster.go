@@ -2,6 +2,7 @@ package parser
 
 import (
 	"os"
+	"strings"
 
 	"github.com/brizzai/auto-mcp/internal/logger"
 	"github.com/brizzai/auto-mcp/internal/models"
@@ -96,4 +97,28 @@ func (a *Adjuster) GetDescription(route, method, originalDesc string) string {
 	}
 
 	return originalDesc
+}
+
+// GetResponseTemplate returns the response template declared for a route, or nil
+// when the response should be passed through untouched.
+func (a *Adjuster) GetResponseTemplate(route, method string) *models.ResponseTemplate {
+	if a.adjustments == nil {
+		return nil
+	}
+	for _, entry := range a.adjustments.Responses {
+		if entry.Path != route {
+			continue
+		}
+		for _, update := range entry.Updates {
+			if !strings.EqualFold(update.Method, method) {
+				continue
+			}
+			if !update.Response.Configured() {
+				return nil
+			}
+			template := update.Response
+			return &template
+		}
+	}
+	return nil
 }
