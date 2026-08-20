@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/brizzai/auto-mcp/internal/auth"
@@ -16,7 +15,7 @@ import (
 	"github.com/brizzai/auto-mcp/internal/requester"
 	"github.com/brizzai/auto-mcp/internal/server/handler"
 	"github.com/brizzai/auto-mcp/internal/server/tool"
-	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 )
@@ -35,7 +34,7 @@ var ErrInvalidOAuthProvider = fmt.Errorf("unsupported OAuth provider")
 type Server struct {
 	config    *config.Config
 	parser    parser.Parser
-	mcp       *mcpserver.MCPServer
+	mcp       *mcp.Server
 	requester *requester.HTTPRequester
 	auth      *auth.Service
 	handler   *handler.Handler
@@ -56,10 +55,10 @@ func NewServer(cfg *config.Config, p parser.Parser, requester *requester.HTTPReq
 		logger.Fatal("Requester cannot be nil")
 	}
 
-	mcpServer := mcpserver.NewMCPServer(
-		cfg.Server.Name,
-		cfg.Server.Version,
-	)
+	mcpServer := mcp.NewServer(&mcp.Implementation{
+		Name:    cfg.Server.Name,
+		Version: cfg.Server.Version,
+	}, nil)
 
 	srv := &Server{
 		config:    cfg,
@@ -125,23 +124,29 @@ func (s *Server) setupTools() error {
 			continue
 		}
 
-		s.mcp.AddTool(tool, s.tool.CreateHandler(&tool, executor))
+		s.mcp.AddTool(tool, s.tool.CreateHandler(tool, executor))
 	}
 	return nil
 }
 
 func (s *Server) ServeSSE(ctx context.Context) error {
 	logger.Info("Starting SSE server")
-
-	sseServer := mcpserver.NewSSEServer(s.mcp)
-
-	return s.serveHTTP(ctx, sseServer, "SSE")
+	return s.serveHTTP(ctx, mcp.NewSSEHandler(s.serverForRequest, nil), "SSE")
 }
 
 func (s *Server) ServeHTTP(ctx context.Context) error {
 	logger.Info("Starting HTTP server")
-	httpServer := mcpserver.NewStreamableHTTPServer(s.mcp)
-	return s.serveHTTP(ctx, httpServer, "HTTP")
+	return s.serveHTTP(ctx, mcp.NewStreamableHTTPHandler(s.serverForRequest, nil), "HTTP")
+}
+
+// serverForRequest picks the MCP server that should handle an incoming request.
+//
+// Both HTTP transports resolve the server per request rather than binding one at
+// construction, which is the hook for serving several upstreams from one
+// process: this is where a lookup by request path (say /mcp/{merchant}) belongs.
+// Today there is a single spec, so every request gets the same server.
+func (s *Server) serverForRequest(*http.Request) *mcp.Server {
+	return s.mcp
 }
 
 func (s *Server) serveHTTP(ctx context.Context, handler http.Handler, mode string) error {
@@ -188,8 +193,7 @@ func (s *Server) serveHTTP(ctx context.Context, handler http.Handler, mode strin
 
 func (s *Server) ServeSTDIO(ctx context.Context) error {
 	logger.Info("Starting STDIO server")
-	stdioServer := mcpserver.NewStdioServer(s.mcp)
-	return stdioServer.Listen(ctx, os.Stdin, os.Stdout)
+	return s.mcp.Run(ctx, &mcp.StdioTransport{})
 }
 
 // Start starts the server in the configured mode (SSE, HTTP, or STDIO).

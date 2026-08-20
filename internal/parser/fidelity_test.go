@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -31,7 +31,13 @@ const merchantSpecJSON = `{
       "tags": ["hotel"], "operationId": "queryHotelInfo", "summary": "Query hotel detail",
       "requestBody": { "required": true, "content": { "application/json": {
         "schema": { "$ref": "#/components/schemas/HotelInfoRequest" } } } },
-      "responses": { "200": { "description": "OK" } } } },
+      "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": {
+        "type": "object",
+        "properties": {
+          "returnCode": { "type": "string", "description": "Upstream status code", "example": "000" },
+          "bussinessResponse": { "type": "object", "properties": {
+            "hotelName": { "type": "string", "description": "Hotel name" },
+            "starRate": { "type": "integer" } } } } } } } } } } },
     "/api/createOrder": { "post": {
       "tags": ["order"], "operationId": "createOrder", "summary": "Create order",
       "requestBody": { "required": true, "content": { "application/json": { "schema": {
@@ -48,7 +54,8 @@ const merchantSpecJSON = `{
         "properties": { "payment": { "oneOf": [
           { "$ref": "#/components/schemas/CardPayment" },
           { "$ref": "#/components/schemas/WalletPayment" } ] } } } } } },
-      "responses": { "200": { "description": "OK" } } } },
+      "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": {
+        "type": "array", "items": { "type": "string" } } } } } } } },
     "/api/order/{orderId}": { "get": {
       "tags": ["order"], "operationId": "getOrderDetail", "summary": "Query order detail",
       "parameters": [
@@ -147,13 +154,29 @@ func dig(t *testing.T, node any, path ...string) map[string]any {
 	return cur
 }
 
-func prop(t *testing.T, tool mcp.Tool, name string) map[string]any {
+// inputSchema returns the tool's inputSchema as a map. The SDK types the field
+// as `any` so that a server can publish a schema it built itself.
+func inputSchema(t *testing.T, tool *mcp.Tool) map[string]any {
 	t.Helper()
-	raw, ok := tool.InputSchema.Properties[name]
-	require.True(t, ok, "tool %s has no property %q (has %v)", tool.Name, name, keysOf(tool.InputSchema.Properties))
+	m, ok := tool.InputSchema.(map[string]any)
+	require.True(t, ok, "tool %s inputSchema is not a map: %#v", tool.Name, tool.InputSchema)
+	return m
+}
+
+func prop(t *testing.T, tool *mcp.Tool, name string) map[string]any {
+	t.Helper()
+	props := dig(t, inputSchema(t, tool), "properties")
+	raw, ok := props[name]
+	require.True(t, ok, "tool %s has no property %q (has %v)", tool.Name, name, keysOf(props))
 	m, ok := raw.(map[string]any)
 	require.True(t, ok, "property %q is not an object", name)
 	return m
+}
+
+// toolRequired lists the tool-level required argument names.
+func toolRequired(t *testing.T, tool *mcp.Tool) []string {
+	t.Helper()
+	return requiredList(t, inputSchema(t, tool))
 }
 
 func keysOf(m map[string]any) []string {
@@ -271,7 +294,7 @@ func TestFidelity_ParametersKeepTypeAndLocation(t *testing.T) {
 	orderID := prop(t, rt.Tool, "orderId")
 	assert.Equal(t, "string", orderID["type"])
 	assert.Equal(t, "SO2026", orderID["example"])
-	assert.Contains(t, rt.Tool.InputSchema.Required, "orderId")
+	assert.Contains(t, toolRequired(t, rt.Tool), "orderId")
 
 	starRates := prop(t, rt.Tool, "starRates")
 	assert.Equal(t, "array", starRates["type"], "an array query parameter must not be flattened to string")
@@ -284,26 +307,63 @@ func TestFidelity_ParametersKeepTypeAndLocation(t *testing.T) {
 	assert.NotNil(t, prop(t, rt.Tool, "X-Trace-Id"), "header parameters must be exposed")
 }
 
-// GET is safely read-only; POST is not asserted either way because these APIs
-// use POST for reads as well, and a wrong readOnlyHint=false is worse than none.
-func TestFidelity_ReadOnlyHintOnlyForGet(t *testing.T) {
+// GET carries the guarantees HTTP gives it. POST carries no annotation at all,
+// because these APIs serve reads over POST and the SDK marshals ReadOnlyHint as
+// a bare bool: any annotation on a POST would publish readOnlyHint=false, which
+// asserts that the operation writes.
+func TestFidelity_AnnotationsOnlyStateWhatTheMethodGuarantees(t *testing.T) {
 	tools := toolsByName(t, parseSpec(t, merchantSpecJSON))
 	require.Contains(t, tools, "getOrderDetail")
 	require.Contains(t, tools, "queryHotelInfo")
 
-	get := tools["getOrderDetail"].Tool.Annotations.ReadOnlyHint
-	require.NotNil(t, get, "GET must be annotated read-only")
-	assert.True(t, *get)
+	get := tools["getOrderDetail"].Tool.Annotations
+	require.NotNil(t, get, "GET must be annotated")
+	assert.True(t, get.ReadOnlyHint, "GET is read-only")
+	require.NotNil(t, get.DestructiveHint)
+	assert.False(t, *get.DestructiveHint, "GET does not destroy")
+	assert.True(t, get.IdempotentHint, "GET is idempotent")
 
-	assert.False(t, *tools["getOrderDetail"].Tool.Annotations.DestructiveHint)
+	assert.Nil(t, tools["queryHotelInfo"].Tool.Annotations,
+		"POST must not claim to be either a read or a write")
+	assert.Nil(t, tools["createOrder"].Tool.Annotations)
+}
 
-	// POST carries no hint at all: mcp-go's defaults would otherwise assert
-	// "not read-only, destructive" for every operation, which is a guess.
-	post := tools["queryHotelInfo"].Tool.Annotations
-	assert.Nil(t, post.ReadOnlyHint, "POST must not claim to be a write or a read")
-	assert.Nil(t, post.DestructiveHint, "POST must not claim to be destructive")
-	assert.Nil(t, post.IdempotentHint)
-	assert.Nil(t, post.OpenWorldHint)
+// The success response schema is published as outputSchema, so a caller can see
+// what it can read back without having to call the tool to find out.
+func TestFidelity_ResponseSchemaBecomesOutputSchema(t *testing.T) {
+	tools := toolsByName(t, parseSpec(t, merchantSpecJSON))
+	require.Contains(t, tools, "queryHotelInfo")
+
+	out, ok := tools["queryHotelInfo"].Tool.OutputSchema.(map[string]any)
+	require.True(t, ok, "outputSchema must be a converted schema map")
+	assert.Equal(t, "object", out["type"])
+
+	code := dig(t, out, "properties", "returnCode")
+	assert.Equal(t, "Upstream status code", code["description"])
+	assert.Equal(t, "000", code["example"])
+
+	// Nesting survives here for the same reason it does on the input side.
+	hotelName := dig(t, out, "properties", "bussinessResponse", "properties", "hotelName")
+	assert.Equal(t, "string", hotelName["type"])
+	assert.Equal(t, "Hotel name", hotelName["description"])
+}
+
+// MCP requires the top level of an outputSchema to be an object. A response that
+// is an array is left undeclared rather than misdeclared: a client that
+// validates against the wrong shape would reject every successful call.
+func TestFidelity_NonObjectResponseIsNotDeclared(t *testing.T) {
+	tools := toolsByName(t, parseSpec(t, merchantSpecJSON))
+	require.Contains(t, tools, "payOrder")
+
+	assert.Nil(t, tools["payOrder"].Tool.OutputSchema)
+}
+
+// A response with no schema at all leaves outputSchema unset.
+func TestFidelity_MissingResponseSchemaLeavesOutputUnset(t *testing.T) {
+	tools := toolsByName(t, parseSpec(t, merchantSpecJSON))
+	require.Contains(t, tools, "createOrder")
+
+	assert.Nil(t, tools["createOrder"].Tool.OutputSchema)
 }
 
 // Onboarding hands over YAML, so YAML must load.

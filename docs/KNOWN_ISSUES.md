@@ -3,6 +3,9 @@
 针对「放一份商户 OpenAPI 就得到一条 MCP 路由」这个目标，下面是已定位、未解决的问题。
 每条都带定位到文件的锚点。已解决的部分见 PR #1。
 
+MCP 库已从 `github.com/mark3labs/mcp-go` 换成官方 `github.com/modelcontextprotocol/go-sdk`，
+本文件中受此影响的条目已相应更新。
+
 ## 1. 多租户: 一份 spec 一条路由(未做)
 
 现在的架构是「一个进程一份 spec」。三处挡着:
@@ -15,13 +18,21 @@
 - `internal/server/handler/http.go` 把 MCP handler 挂在 `mux.Handle("/")`，
   没有按商户区分的路径。
 
-改动面比看上去集中: `NewHTTPRequester` / `NewHTTPAuthManager` / `NewHTTPRequestBuilder`
-三个构造函数**已经是参数化的**，只是被 fx 喂了单例值。
+改动面比看上去集中:
 
-注意:
-- `mcp-go` 的 `StreamableHTTPServer` 挂子路径要用它自己的 endpoint path 选项，
-  不要靠 mux 前缀推断。
+- `NewHTTPRequester` / `NewHTTPAuthManager` / `NewHTTPRequestBuilder` 三个构造函数
+  **已经是参数化的**，只是被 fx 喂了单例值。
+- **按请求选 server 的挂点已经就位**。换库之后两个 HTTP 传输都走
+  `mcp.NewStreamableHTTPHandler(getServer, ...)` / `mcp.NewSSEHandler(getServer, ...)`，
+  `getServer` 的签名是 `func(*http.Request) *mcp.Server` —— 官方 SDK 天生按请求解析
+  server，而不是构造时绑定一个。当前实现是
+  `internal/server/server.go` 的 `(*Server).serverForRequest`，返回唯一那个 server;
+  按 `/mcp/{merchant}` 查表就加在这里。
+
+还需要注意:
 - 商户下线时对应路由要能摘掉，不能只靠重启进程。
+- 上游调用方的 HTTP 头可以从 `request.Extra.Header` 读到(`mcp.CallToolRequest` =
+  `ServerRequest[*CallToolParamsRaw]`)，需要把调用方的头转发给上游时用得上。
 
 ## 2. `/mcp` 默认无鉴权，而进程持有全部商户的上游凭证
 
@@ -38,13 +49,22 @@ logger.Info("Running without authentication")
 至少要有其一:静态 bearer；或只监听 loopback、由同机调用方访问。两者都没有时
 多租户不应上线。
 
-## 3. `outputSchema` 无法暴露(受阻于依赖)
+## 3. `outputSchema` 无法暴露 —— 已解决
 
-`mcp-go v0.31.0` 的 `mcp.Tool` 只有 `Name` / `Description` / `InputSchema` /
-`RawInputSchema` / `Annotations`，**没有 `OutputSchema` 字段**。因此 OpenAPI 的
-响应 schema 目前完全没有被使用，调用方无法从工具定义知道能从结果里取到什么。
+换用官方 SDK 后解决。`mcp.Tool.OutputSchema` 的类型是 `any`，可以直接放一份自己
+构造的 JSON Schema。
 
-要么升级 mcp-go，要么改用 `NewToolWithRawSchema` 自己拼(那会绕过现有的 option 体系)。
+实现:`internal/parser/parser.go` 的 `responseSchema` 取 2xx 响应的 schema
+(`200` → `201` → `default`，媒体类型按名字排序保证确定性)，走同一个 `jsonSchemaFor`。
+**顶层不是 object 的响应(数组、标量)不声明** —— MCP 要求 outputSchema 顶层是 object，
+声明错的形状比不声明更糟:会校验的客户端会拒掉每一次成功调用。
+
+同时补上了配套的 `structuredContent`(`internal/server/tool/handler.go` 的
+`successResult`):声明了 outputSchema 却只回文本，等于叫客户端等一个永不到达的
+结构化结果。上游回的不是 JSON 对象时降级为仅文本，不报协议错误。
+
+顺带一个前提也随之满足:`outputSchema` 要求 2025-06-18 之后的协议，而旧库协商出来的是
+2025-03-26。现在协商结果是 **2025-11-25**。
 
 ## 4. `oneOf` / `anyOf` 的转换是有损的(需确认取舍)
 
@@ -72,8 +92,13 @@ Failed to load configuration: Config File "config" Not Found in "[. /etc/auto-mc
 文档把 CLI flag 与 `AUTO_MCP_*` 环境变量描述为可用的配置方式，但没有配置文件时
 两者都到不了启动那一步。容器化部署里这条最碍事。
 
-## 7. 既有 lint 告警(未触碰)
+## 7. 既有 lint 告警 —— 已解决
 
-`golangci-lint run ./...` 在 `internal/tui/main_page.go:118` 与 `:125` 报两处
-`QF1012`(`WriteString(fmt.Sprintf(...))` 应为 `Fprintf`)。与本轮改动无关，
-未一并修改以免扩大 diff。
+`internal/tui/main_page.go` 的两处 `QF1012` 已改为 `fmt.Fprintf`。
+`golangci-lint run ./...` 现在是 0 issues。
+
+## 8. Go 版本要求提高到 1.25
+
+官方 SDK 的 `go.mod` 声明 `go 1.25.0`，因此本仓的 go 指令从 1.24.1 提到 1.25.0。
+`.github/workflows/*.yml` 与 `Dockerfile` 里固定的版本已同步更新。使用旧工具链构建的
+下游需要一并升级。

@@ -115,14 +115,14 @@ func (m MainPageModel) View() string {
 
 	for i := 0; i < displayedRoutes; i++ {
 		route := m.routeTools[i]
-		routePreviewContent.WriteString(fmt.Sprintf("%s %s\n",
+		fmt.Fprintf(&routePreviewContent, "%s %s\n",
 			route.RouteConfig.Method,
 			route.RouteConfig.Path,
-		))
+		)
 	}
 
 	if len(m.routeTools) > maxPreviewRoutes {
-		routePreviewContent.WriteString(fmt.Sprintf("\n... and %d more routes", len(m.routeTools)-maxPreviewRoutes))
+		fmt.Fprintf(&routePreviewContent, "\n... and %d more routes", len(m.routeTools)-maxPreviewRoutes)
 	}
 
 	routePreview := routePreviewStyle.Render(routePreviewContent.String())

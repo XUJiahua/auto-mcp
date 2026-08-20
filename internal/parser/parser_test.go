@@ -10,8 +10,8 @@ import (
 	"github.com/brizzai/auto-mcp/internal/models"
 	"github.com/brizzai/auto-mcp/internal/requester"
 	"github.com/getkin/kin-openapi/openapi3"
-	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestExtractPathParams(t *testing.T) {
@@ -168,13 +168,13 @@ func TestSwaggerParser_GenerateTool(t *testing.T) {
 		assert.Contains(t, tool.Description, "Get user by ID")
 
 		// Check that path parameter is required
-		assert.Contains(t, tool.InputSchema.Required, "id")
+		assert.Contains(t, toolRequired(t, tool), "id")
 
 		// Verify properties exist
-		_, hasID := tool.InputSchema.Properties["id"]
+		_, hasID := dig(t, inputSchema(t, tool), "properties")["id"]
 		assert.True(t, hasID, "Tool should have 'id' property")
 
-		_, hasInclude := tool.InputSchema.Properties["include"]
+		_, hasInclude := dig(t, inputSchema(t, tool), "properties")["include"]
 		assert.True(t, hasInclude, "Tool should have 'include' property")
 	})
 
@@ -191,12 +191,12 @@ func TestSwaggerParser_GenerateTool(t *testing.T) {
 		assert.Contains(t, tool.Description, "Create user")
 
 		// Check that the body property exists
-		bodyProp, ok := tool.InputSchema.Properties["body"].(map[string]interface{})
+		bodyProp, ok := dig(t, inputSchema(t, tool), "properties")["body"].(map[string]interface{})
 		assert.True(t, ok, "Body should be a map")
 		assert.Equal(t, "object", bodyProp["type"])
 
 		// Log the actual required array for debugging
-		t.Logf("Top-level required: %+v", tool.InputSchema.Required)
+		t.Logf("Top-level required: %+v", toolRequired(t, tool))
 		// Do NOT assert 'body' is in required, as MCP does not add it
 
 		// Verify body properties exist
@@ -405,15 +405,15 @@ func TestSwaggerParser_ProcessOperations(t *testing.T) {
 	assert.Contains(t, postTool.Tool.Description, "Create a new user")
 
 	// Check body schema
-	bodyProp, ok := postTool.Tool.InputSchema.Properties["body"].(map[string]interface{})
+	bodyProp, ok := dig(t, inputSchema(t, postTool.Tool), "properties")["body"].(map[string]interface{})
 	assert.True(t, ok, "POST tool should have a body property")
 
 	// Check that the body property exists
 	assert.Equal(t, "object", bodyProp["type"])
 
 	// Check that body is in the required fields (if present)
-	if postTool.Tool.InputSchema.Required != nil {
-		assert.Contains(t, postTool.Tool.InputSchema.Required, "body")
+	if required := toolRequired(t, postTool.Tool); required != nil {
+		assert.Contains(t, required, "body")
 	}
 
 	// Verify body properties exist
@@ -518,16 +518,10 @@ func TestAddBodyParameter_ContentTypes(t *testing.T) {
 			Method: "POST",
 		}
 
-		var opts []mcp.ToolOption
-		parser.addBodyParameter(route, &opts)
+		bodyProp, _ := parser.bodyParameter(route, parser.findOperation(route))
+		require.NotNil(t, bodyProp, "Should have produced a body schema")
 
-		assert.Len(t, opts, 1, "Should have added 1 body option")
-
-		tool := mcp.NewTool("test", opts...)
-		bodyProp, ok := tool.InputSchema.Properties["body"].(map[string]interface{})
-		assert.True(t, ok, "Should have a body property")
-
-		props, ok := bodyProp["properties"].(map[string]interface{})
+		props, ok := bodyProp["properties"].(map[string]any)
 		assert.True(t, ok, "Body should have properties")
 
 		// Log the actual structure for debugging
@@ -543,16 +537,10 @@ func TestAddBodyParameter_ContentTypes(t *testing.T) {
 			Method: "POST",
 		}
 
-		var opts []mcp.ToolOption
-		parser.addBodyParameter(route, &opts)
+		bodyProp, _ := parser.bodyParameter(route, parser.findOperation(route))
+		require.NotNil(t, bodyProp, "Should have produced a body schema")
 
-		assert.Len(t, opts, 1, "Should have added 1 body option")
-
-		tool := mcp.NewTool("test", opts...)
-		bodyProp, ok := tool.InputSchema.Properties["body"].(map[string]interface{})
-		assert.True(t, ok, "Should have a body property")
-
-		props, ok := bodyProp["properties"].(map[string]interface{})
+		props, ok := bodyProp["properties"].(map[string]any)
 		assert.True(t, ok, "Body should have properties")
 
 		// Should have xmlField

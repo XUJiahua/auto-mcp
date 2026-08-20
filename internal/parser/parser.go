@@ -15,7 +15,7 @@ import (
 	"github.com/getkin/kin-openapi/openapi2"
 	"github.com/getkin/kin-openapi/openapi2conv"
 	"github.com/getkin/kin-openapi/openapi3"
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -37,65 +37,73 @@ func (p *SwaggerParser) GetRouteTools() []*RouteTool {
 }
 
 // generateTool creates an MCP tool from a route configuration
-func (p *SwaggerParser) generateTool(route *requester.RouteConfig) mcp.Tool {
+func (p *SwaggerParser) generateTool(route *requester.RouteConfig) *mcp.Tool {
 	operation := p.findOperation(route)
 
-	opts := []mcp.ToolOption{
-		mcp.WithDescription(fmt.Sprintf("%s %s \n %s", route.Method, route.Path, route.Description)),
-	}
+	schema := newInputSchemaBuilder()
+	p.addParameters(schema, route, operation)
 
-	opts = append(opts, methodAnnotations(route.Method)...)
-
-	opts = append(opts, p.parameterOptions(route, operation)...)
-
-	// Add file upload configuration
 	if route.MethodConfig.FileUpload != nil {
-		opts = append(opts, mcp.WithString("file",
-			mcp.Required(),
-			mcp.Description("File to upload"),
-		))
+		schema.add("file", map[string]any{
+			"type":        "string",
+			"description": "File to upload",
+		}, true)
 	}
-
-	// Add form fields
 	for _, field := range route.MethodConfig.FormFields {
-		opts = append(opts, mcp.WithString(field,
-			mcp.Description(fmt.Sprintf("Form field: %s", field)),
-		))
+		schema.add(field, map[string]any{
+			"type":        "string",
+			"description": fmt.Sprintf("Form field: %s", field),
+		}, false)
 	}
 
-	// Add body parameter if it's a POST/PUT/PATCH request
-	if route.Method == "POST" || route.Method == "PUT" || route.Method == "PATCH" {
-		p.addBodyParameter(route, &opts)
+	if route.Method == http.MethodPost || route.Method == http.MethodPut || route.Method == http.MethodPatch {
+		if body, required := p.bodyParameter(route, operation); body != nil {
+			schema.add("body", body, required)
+		}
 	}
 
-	return mcp.NewTool(p.toolName(route, operation), opts...)
+	return &mcp.Tool{
+		Name:         p.toolName(route, operation),
+		Description:  fmt.Sprintf("%s %s \n %s", route.Method, route.Path, route.Description),
+		InputSchema:  schema.build(),
+		OutputSchema: responseSchema(operation),
+		Annotations:  methodAnnotations(route.Method),
+	}
 }
 
 // methodAnnotations states only what the HTTP method actually establishes.
 //
-// mcp.NewTool ships non-nil defaults (readOnlyHint=false, destructiveHint=true)
-// for every tool, so an unannotated GET arrives at the client claiming to be a
-// destructive write. Those defaults are guesses presented as facts, so they are
-// cleared first and then only the method's own guarantees are set:
+// A nil return means "no annotations", which is deliberate for POST and PATCH:
+// plenty of these APIs serve reads over POST, and because the SDK marshals
+// ReadOnlyHint as a bare bool, any non-nil annotation on a POST would publish
+// readOnlyHint=false — a claim that the operation writes, which the spec does
+// not support. A consumer that gates confirmation on the hint would then either
+// wave writes through or demand confirmation for every read.
 //
-//   - GET reads and does not destroy.
-//   - DELETE destroys.
-//   - POST/PUT/PATCH are left unset. Many of these APIs serve reads over POST,
-//     so readOnlyHint=false would be a false statement about half of them, and
-//     a consumer that gates confirmation on the hint would either wave through
-//     writes or demand confirmation for every read.
-func methodAnnotations(method string) []mcp.ToolOption {
-	opts := []mcp.ToolOption{mcp.WithToolAnnotation(mcp.ToolAnnotation{})}
+// The methods below do carry guarantees, and they come from HTTP itself rather
+// than from the document:
+//
+//   - GET reads, does not destroy, and is idempotent.
+//   - PUT and DELETE are idempotent; DELETE destroys.
+func methodAnnotations(method string) *mcp.ToolAnnotations {
+	no, yes := false, true
 	switch method {
 	case http.MethodGet:
-		opts = append(opts,
-			mcp.WithReadOnlyHintAnnotation(true),
-			mcp.WithDestructiveHintAnnotation(false),
-		)
+		return &mcp.ToolAnnotations{
+			ReadOnlyHint:    true,
+			DestructiveHint: &no,
+			IdempotentHint:  true,
+		}
 	case http.MethodDelete:
-		opts = append(opts, mcp.WithDestructiveHintAnnotation(true))
+		return &mcp.ToolAnnotations{
+			DestructiveHint: &yes,
+			IdempotentHint:  true,
+		}
+	case http.MethodPut:
+		return &mcp.ToolAnnotations{IdempotentHint: true}
+	default:
+		return nil
 	}
-	return opts
 }
 
 // toolName prefers the operationId over method+path.
@@ -166,44 +174,39 @@ func (p *SwaggerParser) uniqueToolName(base string) string {
 	}
 }
 
-// parameterOptions exposes path, query, header and cookie parameters with the
+// addParameters exposes path, query, header and cookie parameters with the
 // type, enum, default and example the spec declared for them.
-func (p *SwaggerParser) parameterOptions(route *requester.RouteConfig, operation *openapi3.Operation) []mcp.ToolOption {
-	var opts []mcp.ToolOption
-	declared := map[string]bool{}
-
+func (p *SwaggerParser) addParameters(schema *inputSchemaBuilder, route *requester.RouteConfig, operation *openapi3.Operation) {
 	for _, param := range p.operationParameters(route, operation) {
 		if param.Value == nil || param.Value.Name == "" {
 			continue
 		}
 		value := param.Value
-		declared[value.Name] = true
 
-		schema := jsonSchemaFor(value.Schema)
+		paramSchema := jsonSchemaFor(value.Schema)
 		if value.Description != "" {
-			schema["description"] = value.Description
+			paramSchema["description"] = value.Description
 		}
 		if example := parameterExample(value); example != nil {
-			schema["example"] = example
+			paramSchema["example"] = example
 		}
 		// Path parameters are always required regardless of what the spec says:
 		// the URL cannot be built without them.
 		required := value.Required || value.In == string(requester.ParamInPath)
-		opts = append(opts, withSchemaProperty(value.Name, schema, required))
+		schema.add(value.Name, paramSchema, required)
 	}
 
 	// Path placeholders that the spec forgot to declare still have to be
 	// fillable, otherwise the URL keeps its braces and the call 404s.
 	for _, name := range extractPathParams(route.Path) {
-		if declared[name] {
+		if schema.has(name) {
 			continue
 		}
-		opts = append(opts, withSchemaProperty(name, map[string]any{
+		schema.add(name, map[string]any{
 			"type":        "string",
 			"description": fmt.Sprintf("Path parameter: %s (not declared in the spec)", name),
-		}, true))
+		}, true)
 	}
-	return opts
 }
 
 // operationParameters merges path-level parameters into the operation's own;
@@ -267,20 +270,64 @@ func (p *SwaggerParser) findOperation(route *requester.RouteConfig) *openapi3.Op
 	}
 }
 
-// addBodyParameter adds body parameters to the tool options
-func (p *SwaggerParser) addBodyParameter(route *requester.RouteConfig, opts *[]mcp.ToolOption) {
-	operation := p.findOperation(route)
+// bodyParameter returns the request body schema and whether it is required.
+func (p *SwaggerParser) bodyParameter(route *requester.RouteConfig, operation *openapi3.Operation) (map[string]any, bool) {
 	if operation == nil {
 		logger.Debug("No operation found",
 			zap.String("path", route.Path),
 			zap.String("method", route.Method))
-		return
+		return nil, false
 	}
-
 	schema, required := getFirstBodySchema(operation)
-	if schema != nil {
-		*opts = append(*opts, schemaToMCPOptions(schema, "body", required))
+	if schema == nil {
+		return nil, false
 	}
+	return bodySchema(schema), required
+}
+
+// responseSchema exposes the success response schema as the tool's
+// outputSchema, so a caller can see what it can read back instead of having to
+// call the tool to find out.
+//
+// MCP requires the top level of an outputSchema to be an object. A response
+// that is an array or a scalar is therefore skipped rather than misreported:
+// declaring the wrong shape is worse than declaring none, because a client that
+// validates would reject every successful call.
+func responseSchema(operation *openapi3.Operation) map[string]any {
+	if operation == nil || operation.Responses == nil {
+		return nil
+	}
+	for _, code := range []string{"200", "201", "default"} {
+		response := operation.Responses.Value(code)
+		if response == nil || response.Value == nil {
+			continue
+		}
+		for _, mediaType := range sortedContentTypes(response.Value.Content) {
+			schema := response.Value.Content[mediaType].Schema
+			if schema == nil || schema.Value == nil {
+				continue
+			}
+			converted := jsonSchemaFor(schema)
+			if converted["type"] != "object" {
+				continue
+			}
+			return converted
+		}
+	}
+	return nil
+}
+
+// sortedContentTypes keeps the choice of response media type deterministic;
+// Go map iteration order would otherwise leak into the published schema.
+func sortedContentTypes(content openapi3.Content) []string {
+	out := make([]string, 0, len(content))
+	for name, mediaType := range content {
+		if mediaType != nil {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func getFirstBodySchema(operation *openapi3.Operation) (*openapi3.SchemaRef, bool) {

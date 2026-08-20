@@ -5,13 +5,13 @@ import (
 
 	"github.com/brizzai/auto-mcp/internal/requester"
 	"github.com/getkin/kin-openapi/openapi3"
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // RouteTool combines a route configuration with its corresponding MCP tool
 type RouteTool struct {
 	RouteConfig *requester.RouteConfig
-	Tool        mcp.Tool
+	Tool        *mcp.Tool
 }
 
 // Parser handles parsing of Swagger/OpenAPI specifications

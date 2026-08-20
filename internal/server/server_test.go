@@ -13,8 +13,7 @@ import (
 	"github.com/brizzai/auto-mcp/internal/config"
 	"github.com/brizzai/auto-mcp/internal/parser"
 	"github.com/brizzai/auto-mcp/internal/requester"
-	"github.com/mark3labs/mcp-go/client"
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -118,7 +117,7 @@ func TestNewMCPServer_SemiE2E(t *testing.T) {
 		// Check that query parameters are correctly defined. The spec declares
 		// status as an array of enum'd strings; flattening it to a plain string
 		// would make the parameter unserialisable as repeated query keys.
-		params := findByStatusTool.Tool.InputSchema.Properties
+		params := toolProperties(t, findByStatusTool.Tool)
 		statusParam, hasStatus := params["status"].(map[string]interface{})
 		require.True(t, hasStatus, "Should have 'status' query parameter")
 		assert.Equal(t, "array", statusParam["type"], "Status parameter should keep its declared array type")
@@ -126,7 +125,7 @@ func TestNewMCPServer_SemiE2E(t *testing.T) {
 		require.True(t, hasItems, "Array parameter should keep its item schema")
 		assert.Equal(t, "string", items["type"])
 		assert.ElementsMatch(t, []interface{}{"available", "pending", "sold"}, items["enum"])
-		assert.Contains(t, findByStatusTool.Tool.InputSchema.Required, "status")
+		assert.Contains(t, toolRequiredNames(t, findByStatusTool.Tool), "status")
 
 		// Check the route configuration
 		assert.Equal(t, "GET", findByStatusTool.RouteConfig.Method)
@@ -243,29 +242,17 @@ func TestMCPServer_ListTools(t *testing.T) {
 	defer cancel()
 
 	// Create an SSE client to communicate with the server
-	sseClient, err := client.NewSSEMCPClient(serverAddr)
-	require.NoError(t, err, "Failed to create SSE client")
-
-	// Start the client and initialize it
-	err = sseClient.Start(clientCtx)
-	require.NoError(t, err, "Failed to start client")
-
-	// Initialize the client with the server
-	initReq := mcp.InitializeRequest{}
-	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	initReq.Params.Capabilities = mcp.ClientCapabilities{}
-	initReq.Params.ClientInfo = mcp.Implementation{
-		Name:    "test-client",
-		Version: "1.0.0",
-	}
-
-	initResult, err := sseClient.Initialize(clientCtx, initReq)
-	require.NoError(t, err, "Failed to initialize client")
-	require.NotNil(t, initResult, "Initialize result is nil")
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "auto-mcp-test", Version: "1.0.0"}, nil)
+	session, err := mcpClient.Connect(clientCtx, &mcp.SSEClientTransport{Endpoint: serverAddr}, nil)
+	// Connect performs the initialize handshake, so there is no separate
+	// start/initialize step.
+	require.NoError(t, err, "Failed to connect SSE client")
+	defer func() { _ = session.Close() }()
+	require.NotNil(t, session.InitializeResult(), "Initialize result is nil")
 
 	// Test listing available tools
 	t.Run("List Available Tools", func(t *testing.T) {
-		tools, err := sseClient.ListTools(clientCtx, mcp.ListToolsRequest{})
+		tools, err := session.ListTools(clientCtx, nil)
 		require.NoError(t, err, "Failed to get tools from server")
 		require.NotEmpty(t, tools.Tools, "No tools returned")
 
@@ -300,18 +287,18 @@ func TestMCPServer_ListTools(t *testing.T) {
 		toolName := "uploadFile"
 
 		// Find the tool in the list of tools
-		var tool mcp.Tool
-		tools, err := sseClient.ListTools(clientCtx, mcp.ListToolsRequest{})
+		var tool *mcp.Tool
+		tools, err := session.ListTools(clientCtx, nil)
 		require.NoError(t, err, "Failed to get tools")
 
-		for _, t := range tools.Tools {
-			if t.Name == toolName {
-				tool = t
+		for _, candidate := range tools.Tools {
+			if candidate.Name == toolName {
+				tool = candidate
 				break
 			}
 		}
 
-		require.NotEmpty(t, tool, "Failed to find tool")
+		require.NotNil(t, tool, "Failed to find tool")
 
 		// Verify the tool details
 		assert.Equal(t, toolName, tool.Name, "Incorrect tool name")
@@ -325,16 +312,12 @@ func TestMCPServer_ListTools(t *testing.T) {
 		// Test the GET /pet/findByStatus endpoint (it's simple and doesn't require complex data)
 		toolName := "findPetsByStatus"
 
-		// Create tool call request
-		request := mcp.CallToolRequest{}
-		request.Params.Name = toolName
-		request.Params.Arguments = map[string]interface{}{
-			"status": "available",
-		}
-
 		// We don't expect this to succeed since we're not hitting a real API,
 		// but we want to ensure the request is properly processed by the server
-		_, err := sseClient.CallTool(clientCtx, request)
+		_, err := session.CallTool(clientCtx, &mcp.CallToolParams{
+			Name:      toolName,
+			Arguments: map[string]any{"status": "available"},
+		})
 		// It's okay if this fails with a specific type of error indicating the actual endpoint couldn't be called
 		// We're just testing that the server accepts and processes the request as expected
 		if err != nil {
@@ -433,7 +416,11 @@ func TestMCPServer_ContextCancellation(t *testing.T) {
 // TestMCPServer_ToolRegistration verifies that tools are correctly registered with the MCP server
 func TestMCPServer_ToolRegistration(t *testing.T) {
 	// Define a simple tool for testing
-	testTool := mcp.NewTool("test_tool", mcp.WithDescription("Test tool"))
+	testTool := &mcp.Tool{
+		Name:        "test_tool",
+		Description: "Test tool",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+	}
 
 	// Create a mock parser that always returns our test tool
 	mockParser := &mockParser{
@@ -492,4 +479,39 @@ func (m *mockParser) ParseReader(reader io.Reader) error {
 
 func (m *mockParser) GetRouteTools() []*parser.RouteTool {
 	return m.tools
+}
+
+// toolProperties reads a tool's declared arguments. The SDK types InputSchema as
+// `any` so that a server can publish a schema it assembled itself.
+func toolProperties(t *testing.T, tool *mcp.Tool) map[string]any {
+	t.Helper()
+	schema, ok := tool.InputSchema.(map[string]any)
+	require.True(t, ok, "tool %s inputSchema is not a map: %#v", tool.Name, tool.InputSchema)
+	props, ok := schema["properties"].(map[string]any)
+	require.True(t, ok, "tool %s has no properties", tool.Name)
+	return props
+}
+
+// toolRequiredNames reads a tool's required argument names.
+func toolRequiredNames(t *testing.T, tool *mcp.Tool) []string {
+	t.Helper()
+	schema, ok := tool.InputSchema.(map[string]any)
+	require.True(t, ok, "tool %s inputSchema is not a map", tool.Name)
+	switch required := schema["required"].(type) {
+	case nil:
+		return nil
+	case []string:
+		return required
+	case []any:
+		out := make([]string, 0, len(required))
+		for _, item := range required {
+			if name, ok := item.(string); ok {
+				out = append(out, name)
+			}
+		}
+		return out
+	default:
+		t.Fatalf("tool %s required is %T", tool.Name, schema["required"])
+		return nil
+	}
 }
