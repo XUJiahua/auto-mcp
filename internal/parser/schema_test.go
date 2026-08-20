@@ -132,9 +132,9 @@ func TestJSONSchemaFor_ObjectKeepsPropertiesAndConstraints(t *testing.T) {
 			"name": {Value: &openapi3.Schema{Type: &openapi3.Types{"string"}}},
 		},
 		Required:             []string{"name"},
-		MaxProps:             openapi3.Uint64Ptr(10),
+		MaxProps:             openapi3.Ptr[uint64](10),
 		MinProps:             1,
-		AdditionalProperties: openapi3.AdditionalProperties{Has: openapi3.BoolPtr(true)},
+		AdditionalProperties: openapi3.AdditionalProperties{Has: openapi3.Ptr(true)},
 	}})
 
 	assert.Equal(t, "object", got["type"])
@@ -151,7 +151,7 @@ func TestJSONSchemaFor_ObjectKeepsPropertiesAndConstraints(t *testing.T) {
 func TestJSONSchemaFor_StringKeepsConstraints(t *testing.T) {
 	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
 		Type:        &openapi3.Types{"string"},
-		MaxLength:   openapi3.Uint64Ptr(100),
+		MaxLength:   openapi3.Ptr[uint64](100),
 		MinLength:   1,
 		Pattern:     "^[a-zA-Z]+$",
 		Enum:        []interface{}{"option1", "option2"},
@@ -169,9 +169,9 @@ func TestJSONSchemaFor_StringKeepsConstraints(t *testing.T) {
 func TestJSONSchemaFor_NumberKeepsConstraints(t *testing.T) {
 	got := jsonSchemaFor(&openapi3.SchemaRef{Value: &openapi3.Schema{
 		Type:        &openapi3.Types{"number"},
-		Max:         openapi3.Float64Ptr(100),
-		Min:         openapi3.Float64Ptr(0),
-		MultipleOf:  openapi3.Float64Ptr(2),
+		Max:         openapi3.Ptr[float64](100),
+		Min:         openapi3.Ptr[float64](0),
+		MultipleOf:  openapi3.Ptr[float64](2),
 		Description: "Test number",
 	}})
 

@@ -340,10 +340,11 @@ Registered service {"route": "/mcp", "tools": 20, "schema_bytes": 5517,
 Visa Intelligent Commerce 425 KiB/23),**三份全是 OpenAPI 3.1.0**,立刻撞出四个问题。
 
 **(a) 3.1 的数值型 `exclusiveMinimum` 让整份文档加载失败。** 3.1 采用 JSON Schema 2020-12,
-该关键字从"布尔标志"变成"边界本身";kin-openapi 建模的是 3.0,于是 unmarshal 直接失败。
-**agenzo 里 3 处、ledger 里 1 处,就让这两份文档完全加载不了。** 现在在交给 loader 之前
-改写成 3.0 等价形式(`internal/parser/openapi31.go`),输出侧再写回 2020-12 形式
-——SDK 说明它发布的 schema 按 2020-12 读。
+该关键字从"布尔标志"变成"边界本身";当时用的 kin-openapi v0.132 只建模 3.0,于是 unmarshal
+直接失败。**agenzo 里 3 处、ledger 里 1 处,就让这两份文档完全加载不了。**
+当时的做法是在交给 loader 之前改写成 3.0 等价形式。**升级到 kin-openapi v0.147 之后这段
+变通已删除**(见 #15):库自己支持 3.0/3.1/3.2,`ExclusiveMin` 变成了能同时表达数字与布尔的
+`ExclusiveBound`。输出侧仍统一写成 2020-12 形式 —— SDK 说明它发布的 schema 按 2020-12 读。
 
 **(b) `anyOf: [T, null]` 掉进 `type: object` 兜底。** 3.1 没有 `nullable`,可选字段一律写成
 与 null 的联合 —— 两份 FastAPI 生成的文档里共 **156 处**(对比真正的联合只有 3 处)。
@@ -389,3 +390,30 @@ visa    23 个工具 189,121 B   最大 35,776 B   ← compositeTransaction
 
 Visa 那 10 个缺 `operationId` 的 operation 回落成 `delete_vars_v1_agents_agentid_keys_keyid`
 这类名字 —— 可读性差但可用,且不与任何 operationId 冲突。
+
+## 15. 依赖升级:kin-openapi v0.132 → v0.147
+
+`go get -u ./...`,主要依赖全部升到最新。**这次升级替我们删掉了一段变通。**
+
+kin-openapi v0.147 明确声明支持 **OpenAPI 3.0 / 3.1 / 3.2**(v0.132 只有 3.0),其中直接相关的:
+
+- `ExclusiveMin` / `ExclusiveMax` 从 `bool` 变成 `ExclusiveBound{Bool *bool; Value *float64}` ——
+  两种拼写都能区分地保留。**于是 #14(a) 里那段"把 3.1 数值边界改写成 3.0 形式"的
+  规格化整段删除**,而对应的测试不改一行仍然通过 —— 这就是"现在由库负责"的证明。
+- 原生支持 `type` 数组(含 `null`)、`const`、`examples`、`prefixItems` 等 2020-12 关键字。
+  ledger 的 schema 因此大了 192 字节:那些关键字以前被丢掉,现在保留了。
+
+输出侧新增 `writeBound`:无论文档用哪种拼写,发布出去的一律是 2020-12 形式
+(关键字携带边界),因为 SDK 说明它发布的 schema 按 2020-12 读。
+
+**仍然需要我们自己处理的**(实测确认:把 `types` 改写关掉,测试立刻变红):
+
+- **`types` 复数键**(#14c)。它不是任何一版 OpenAPI 的关键字,是 swagger-core 的 Java
+  模型序列化产物,没有解析器会认。`internal/parser/openapi31.go` 从"3.1 兼容层"缩成了
+  只做这一件事的 96 行。
+- **`anyOf:[T, null]` 折叠**(#14b)与 **缺 type 不兜底成 object**(#14d)。这两条是设计决定,
+  不是版本差异 —— 库把两支都如实交给我们,选择怎么呈现是我们的事。
+
+升级后三份真 spec 复验,下游结果与升级前一致(visa 仍是 257 flag / 0 个 object 型)。
+顺带修了升级带来的 6 处 lint:`openapi3.Uint64Ptr` / `Float64Ptr` / `BoolPtr` 均已废弃,
+改用泛型 `openapi3.Ptr`。

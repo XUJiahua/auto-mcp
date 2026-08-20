@@ -5,15 +5,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// OpenAPI 3.1 adopted JSON Schema 2020-12, which changed the meaning of a few
-// keywords. kin-openapi models the 3.0 shape, so a 3.1 document that uses the new
-// form fails to unmarshal — and it fails entirely, not partially: three numeric
-// exclusiveMinimum values in a 230 KiB specification were enough to make the whole
-// document unloadable.
-//
-// The constructs handled here are the ones real 3.1 documents were measured to
-// contain. They are rewritten into the equivalent 3.0 form, which is a lossless
-// change of spelling rather than an interpretation.
+// The parser understands OpenAPI 3.0, 3.1 and 3.2 on its own, so what remains
+// here is not a version difference: it is a construct that no version defines.
 
 // normalizeOpenAPI31 rewrites 3.1-only spellings in a decoded document.
 //
@@ -36,8 +29,6 @@ func normalizeOpenAPI31(node any) any {
 func normalizeNode(node any, rewritten *int) any {
 	switch value := node.(type) {
 	case map[string]any:
-		normalizeExclusiveBound(value, "exclusiveMinimum", "minimum")
-		normalizeExclusiveBound(value, "exclusiveMaximum", "maximum")
 		if normalizePluralTypes(value) {
 			*rewritten++
 		}
@@ -53,31 +44,6 @@ func normalizeNode(node any, rewritten *int) any {
 	default:
 		return node
 	}
-}
-
-// normalizeExclusiveBound converts a 2020-12 exclusive bound into the 3.0 pair.
-//
-// In 2020-12 the keyword carries the bound itself ("exclusiveMinimum": 0 means
-// x > 0); in 3.0 it is a flag qualifying minimum. The rewrite is exact.
-//
-// An existing inclusive bound is not overwritten. A document carrying both is
-// contradictory, and the exclusive one is the narrower claim only sometimes;
-// leaving the document's own value in place keeps the outcome predictable
-// instead of resolving a contradiction silently.
-func normalizeExclusiveBound(schema map[string]any, exclusiveKey, inclusiveKey string) {
-	bound, present := schema[exclusiveKey]
-	if !present {
-		return
-	}
-	number, isNumber := bound.(float64)
-	if !isNumber {
-		// Already the 3.0 boolean form.
-		return
-	}
-	if _, taken := schema[inclusiveKey]; !taken {
-		schema[inclusiveKey] = number
-	}
-	schema[exclusiveKey] = true
 }
 
 // normalizePluralTypes rewrites a `types` array into `type`.

@@ -167,25 +167,14 @@ func scalarFacets(schema *openapi3.Schema) map[string]any {
 	if schema.Pattern != "" {
 		out["pattern"] = schema.Pattern
 	}
-	// Exclusive bounds are emitted in the 2020-12 form, where the keyword carries
-	// the bound itself. kin-openapi models OpenAPI 3.0, which spells the same
-	// thing as a boolean flag on minimum/maximum, and the SDK states that the
-	// schema it publishes is read as 2020-12 — so this converts back on the way
-	// out, mirroring the normalisation done on the way in.
-	if schema.Max != nil {
-		if schema.ExclusiveMax {
-			out["exclusiveMaximum"] = *schema.Max
-		} else {
-			out["maximum"] = *schema.Max
-		}
-	}
-	if schema.Min != nil {
-		if schema.ExclusiveMin {
-			out["exclusiveMinimum"] = *schema.Min
-		} else {
-			out["minimum"] = *schema.Min
-		}
-	}
+	// Exclusive bounds are always emitted in the 2020-12 form, where the keyword
+	// carries the bound itself, because the SDK states that the schema it
+	// publishes is read as 2020-12. The document may have said it either way:
+	// 3.1 puts the bound in the keyword, 3.0 puts a flag there and the bound in
+	// minimum/maximum. kin-openapi keeps both spellings distinguishable, so no
+	// guess is involved.
+	writeBound(out, "minimum", "exclusiveMinimum", schema.Min, schema.ExclusiveMin)
+	writeBound(out, "maximum", "exclusiveMaximum", schema.Max, schema.ExclusiveMax)
 	if schema.MultipleOf != nil {
 		out["multipleOf"] = *schema.MultipleOf
 	}
@@ -202,6 +191,26 @@ func scalarFacets(schema *openapi3.Schema) map[string]any {
 		out["minProperties"] = schema.MinProps
 	}
 	return out
+}
+
+// writeBound emits one numeric bound in the 2020-12 spelling.
+func writeBound(out map[string]any, inclusiveKey, exclusiveKey string,
+	bound *float64, exclusive openapi3.ExclusiveBound) {
+
+	// 3.1: the keyword carries the bound.
+	if exclusive.Value != nil {
+		out[exclusiveKey] = *exclusive.Value
+		return
+	}
+	if bound == nil {
+		return
+	}
+	// 3.0: a flag qualifying the inclusive bound.
+	if exclusive.IsTrue() {
+		out[exclusiveKey] = *bound
+		return
+	}
+	out[inclusiveKey] = *bound
 }
 
 // mergeSchema folds an allOf member into the accumulated schema. Facets already
