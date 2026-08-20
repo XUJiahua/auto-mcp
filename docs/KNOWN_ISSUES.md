@@ -6,33 +6,49 @@
 MCP 库已从 `github.com/mark3labs/mcp-go` 换成官方 `github.com/modelcontextprotocol/go-sdk`，
 本文件中受此影响的条目已相应更新。
 
-## 1. 多租户: 一份 spec 一条路由(未做)
+## 1. 多租户: 一份 spec 一条路由 —— 已解决
 
-现在的架构是「一个进程一份 spec」。三处挡着:
+配置里列 `services`,每个 service 得到自己的 MCP 端点 `/mcp/{name}`:
 
-- `cmd/auto-mcp/main.go` 把 `config.EndpointConfig` 作为 **fx 单例**提供
-  (`fx.Provide(func() *config.EndpointConfig { ... })`)，全进程共享一个 `BaseURL`、
-  一种 auth、一个 token。
-- `internal/server/server.go` 的 `Server` 只持有一个 `*mcpserver.MCPServer`，
-  `setupTools()` 从 `cfg.SwaggerFile` 读**一份** spec。
-- `internal/server/handler/http.go` 把 MCP handler 挂在 `mux.Handle("/")`，
-  没有按商户区分的路径。
+```yaml
+services:
+  - name: hotel                       # → /mcp/hotel
+    swagger_file: hotel.yaml
+    endpoint: { base_url: "https://hotel.example.com" }
+    upstream_security: { id: hotel_key }
+  - name: flight                      # → /mcp/flight
+    swagger_file: flight.yaml
+    endpoint: { base_url: "https://flight.example.com" }
+    upstream_security: { id: flight_key }
+```
 
-改动面比看上去集中:
+实测(两个 service、两个上游、两把不同的 key):
 
-- `NewHTTPRequester` / `NewHTTPAuthManager` / `NewHTTPRequestBuilder` 三个构造函数
-  **已经是参数化的**，只是被 fx 喂了单例值。
-- **按请求选 server 的挂点已经就位**。换库之后两个 HTTP 传输都走
-  `mcp.NewStreamableHTTPHandler(getServer, ...)` / `mcp.NewSSEHandler(getServer, ...)`，
-  `getServer` 的签名是 `func(*http.Request) *mcp.Server` —— 官方 SDK 天生按请求解析
-  server，而不是构造时绑定一个。当前实现是
-  `internal/server/server.go` 的 `(*Server).serverForRequest`，返回唯一那个 server;
-  按 `/mcp/{merchant}` 查表就加在这里。
+```
+/mcp/hotel   server="auto-mcp/hotel"   tools=[getHOTEL]   上游 9971 收到 X-API-Key: HK-1
+/mcp/flight  server="auto-mcp/flight"  tools=[getFLIGHT]  上游 9972 收到 X-API-Key: FK-2
+/mcp/nope    404
+```
 
-还需要注意:
-- 商户下线时对应路由要能摘掉，不能只靠重启进程。
-- 上游调用方的 HTTP 头可以从 `request.Extra.Header` 读到(`mcp.CallToolRequest` =
-  `ServerRequest[*CallToolParamsRaw]`)，需要把调用方的头转发给上游时用得上。
+实现要点:
+
+- **每个 service 一套 parser + requester + `mcp.Server`**,不共享。parser 持有它读过的
+  文档,requester 持有它要发往的地址与凭证 —— 共享任何一个都会让某个上游的配置替另一个
+  作答。进程里只共享监听套接字与前门鉴权。
+- 路由挂点就是上一轮换库时留下的那个:官方 SDK 的
+  `mcp.NewStreamableHTTPHandler(getServer, ...)` 按请求解析 server,
+  `Server.serverForRequest` 从 `/mcp/{name}` 取出名字查表。
+- **单 service 形式保留**,端点仍在 `/mcp`,地址不变,`stdio` 也只在这种形式下成立
+  (一根管道对一个客户端,没有可用于区分 service 的地址)。
+- **未知 service 是 404 而不是空工具列表** —— SDK 对解析不出的 server 回 400
+  "no server available",而地址写错应当是 404;否则一个拼错的路由看起来像"一个存在
+  但什么都没有的 service"。
+- `security_schemes` 保持全局(scheme 描述凭证怎么携带,不描述属于哪个上游),
+  `upstream_security` 下沉到每个 service。
+
+fx 的图随之简化:`parser.Module` 与 `requester.Module` 删除,`Server` 自己按 service 构造。
+`server_test.go` 里那个注入 `mockParser` 断言"server 调了 parser.Init"的测试也删了 ——
+注入点不存在了,而它的意图现在由 routing 测试用可观察结果覆盖。
 
 ## 2. `/mcp` 无鉴权 —— 已解决
 
@@ -114,7 +130,7 @@ MCP 库已从 `github.com/mark3labs/mcp-go` 换成官方 `github.com/modelcontex
 (只取 `enum[0]` 当 example),且拍平时会丢掉中间对象节点的 `description`,所以
 分支结构那句话到不了任何 flag。那是消费方的缺口,不是这里的。
 
-## 5. 没有 spec 注册 / 热加载入口
+## 5. 没有 spec 注册 / 热加载入口(仍未做)
 
 加一个商户现在等于改 `config.yaml` 再重启进程。目标形态需要其一:
 目录扫描(`specs/<noun>/openapi.yaml` + 每商户配置)+ SIGHUP reload，或一个

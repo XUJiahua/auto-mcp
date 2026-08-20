@@ -153,6 +153,10 @@ func (c *Config) resolveSecurity() error {
 			"there is nothing further upstream to pass the caller's credential to")
 	}
 
+	if err := c.validateServices(); err != nil {
+		return err
+	}
+
 	return c.validateExposure()
 }
 

@@ -35,8 +35,12 @@ type Config struct {
 	SecuritySchemes []SecurityScheme `mapstructure:"security_schemes"`
 	// DownstreamSecurity authenticates the MCP client calling this server.
 	DownstreamSecurity *SecurityRequirement `mapstructure:"downstream_security"`
-	// UpstreamSecurity authenticates this server to the API it proxies.
+	// UpstreamSecurity authenticates this server to the API it proxies. It is
+	// the single-service form of ServiceConfig.UpstreamSecurity.
 	UpstreamSecurity *SecurityRequirement `mapstructure:"upstream_security"`
+
+	// Services exposes several upstreams from one process, each on its own route.
+	Services []ServiceConfig `mapstructure:"services"`
 }
 
 // EndpointConfig describes the API being proxied. Authentication to it is
@@ -229,11 +233,6 @@ func Load() (*Config, error) {
 
 	if !config.Server.Mode.valid() {
 		return nil, fmt.Errorf("unsupported server mode %q, expected one of stdio, sse, http", config.Server.Mode)
-	}
-
-	// validate swagger file
-	if config.SwaggerFile == "" {
-		return nil, fmt.Errorf("swagger file is required, please adjust the config or pass --swagger-file or AUTO_MCP_SWAGGER_FILE environment variable")
 	}
 
 	if err := config.resolveSecurity(); err != nil {

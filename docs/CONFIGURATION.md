@@ -98,6 +98,61 @@ This approach keeps all related files together and is ideal for local developmen
 
 ---
 
+## 🗂️ Serving several APIs from one process
+
+One `swagger_file` at the top level is the single-service form: its endpoint stays
+at `/mcp`, and `stdio` works because there is only one thing to talk to.
+
+Several APIs are listed under `services`, each becoming its own MCP endpoint at
+`/mcp/{name}`:
+
+```yaml
+security_schemes:
+  - id: hotel_key
+    type: apiKey
+    in: header
+    name: X-API-Key
+    default_credential: "${HOTEL_KEY}"
+  - id: flight_key
+    type: apiKey
+    in: header
+    name: X-API-Key
+    default_credential: "${FLIGHT_KEY}"
+
+services:
+  - name: hotel # served at /mcp/hotel
+    swagger_file: hotel.yaml
+    adjustment_file: hotel-adjustments.yaml
+    endpoint:
+      base_url: https://hotel.example.com
+    upstream_security:
+      id: hotel_key
+  - name: flight # served at /mcp/flight
+    swagger_file: flight.yaml
+    endpoint:
+      base_url: https://flight.example.com
+    upstream_security:
+      id: flight_key
+```
+
+Each service gets its own document, its own adjustments, its own address and its
+own credential. Nothing is shared but the listener and the front-door
+authentication, so one upstream's credential cannot reach another's endpoint.
+
+Security schemes stay global because a scheme describes how a credential is
+carried, not which upstream it belongs to; the same scheme can be referenced by
+several services with different credentials.
+
+A few rules:
+
+- The name is a route segment, so it must be a single path segment
+  (`[a-zA-Z0-9][a-zA-Z0-9_-]*`). Names must be unique, and every service must be
+  named once more than one is configured.
+- A route naming no configured service is a **404**, not an empty tool list: a
+  typo in the address must not look like a service with nothing in it.
+- `stdio` serves a single service. It speaks to one client over one pipe, so
+  there is no address to tell services apart by.
+
 ## ✂️ Shaping upstream responses
 
 The adjustment file already selects routes and rewrites descriptions; it also

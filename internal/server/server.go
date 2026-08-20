@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/brizzai/auto-mcp/internal/auth"
@@ -29,43 +31,35 @@ const (
 // ErrInvalidOAuthProvider indicates an unsupported OAuth provider was specified
 var ErrInvalidOAuthProvider = fmt.Errorf("unsupported OAuth provider")
 
-// Server represents the MCP server instance that handles tool management,
-// authentication, and request processing. It supports multiple operation modes
-// including SSE, HTTP, and STDIO.
+// Server exposes one MCP endpoint per configured service.
+//
+// Each service is a separate upstream with its own document, human edits,
+// address and credential, so each gets its own mcp.Server and its own request
+// builder. Nothing is shared between them but the listener and the front-door
+// authentication, which is what keeps one upstream's credential from reaching
+// another's endpoint.
 type Server struct {
-	config    *config.Config
-	parser    parser.Parser
-	mcp       *mcp.Server
-	requester *requester.HTTPRequester
-	auth      *auth.Service
-	handler   *handler.Handler
-	tool      *tool.Handler
+	config   *config.Config
+	services map[string]*mcp.Server
+	// single is set when the configuration names no services, in which case the
+	// one endpoint answers on any path and keeps its address.
+	single  *mcp.Server
+	auth    *auth.Service
+	handler *handler.Handler
+	tool    *tool.Handler
 }
 
 // NewServer creates a new MCP server instance with the provided configuration.
 // It initializes the server with the given parser and requester, and sets up
 // authentication if enabled in the configuration.
-func NewServer(cfg *config.Config, p parser.Parser, requester *requester.HTTPRequester) *Server {
+func NewServer(cfg *config.Config) *Server {
 	if cfg == nil {
 		logger.Fatal("Config cannot be nil")
 	}
-	if p == nil {
-		logger.Fatal("Parser cannot be nil")
-	}
-	if requester == nil {
-		logger.Fatal("Requester cannot be nil")
-	}
-
-	mcpServer := mcp.NewServer(&mcp.Implementation{
-		Name:    cfg.Server.Name,
-		Version: cfg.Server.Version,
-	}, nil)
 
 	srv := &Server{
-		config:    cfg,
-		parser:    p,
-		mcp:       mcpServer,
-		requester: requester,
+		config:   cfg,
+		services: map[string]*mcp.Server{},
 	}
 
 	if cfg.OAuth != nil && cfg.OAuth.Enabled {
@@ -74,13 +68,16 @@ func NewServer(cfg *config.Config, p parser.Parser, requester *requester.HTTPReq
 		}
 	}
 
-	// Initialize handlers
-	srv.handler = handler.NewHandler(srv.auth, security.New(cfg.SecuritySchemes), cfg.DownstreamSecurity)
 	srv.tool = tool.NewHandler(srv.auth != nil)
 
 	if err := srv.setupTools(); err != nil {
 		logger.Fatal("Failed to setup tools", zap.Error(err))
 	}
+
+	// The HTTP handler routes on the service names, so it can only be built once
+	// the services exist.
+	srv.handler = handler.NewHandler(srv.auth, security.New(cfg.SecuritySchemes),
+		cfg.DownstreamSecurity, srv.ServiceNames())
 
 	return srv
 }
@@ -112,22 +109,64 @@ func (s *Server) setupAuth() error {
 }
 
 func (s *Server) setupTools() error {
-	if err := s.parser.Init(s.config.SwaggerFile, s.config.AdjustmentFile); err != nil {
-		return fmt.Errorf("failed to initialize parser: %w", err)
+	services := s.config.ResolvedServices()
+	if len(services) == 0 {
+		return fmt.Errorf("no service is configured")
 	}
 
-	routes := s.parser.GetRouteTools()
-	for _, route := range routes {
-		tool := route.Tool
-		executor, err := s.requester.BuildRouteExecutor(route.RouteConfig)
+	engine := security.New(s.config.SecuritySchemes)
+	for _, service := range services {
+		mcpServer, err := s.buildService(service, engine)
 		if err != nil {
-			logger.Error("Failed to build route executor", zap.String("tool", tool.Name), zap.Error(err))
-			continue
+			return err
 		}
-
-		s.mcp.AddTool(tool, s.tool.CreateHandler(tool, route.ResponseTemplate, executor))
+		s.services[service.Name] = mcpServer
+		if service.Name == "" {
+			s.single = mcpServer
+		}
+		logger.Info("Registered service",
+			zap.String("route", service.RoutePath()),
+			zap.String("spec", service.SwaggerFile))
 	}
 	return nil
+}
+
+// buildService turns one service configuration into an MCP server.
+//
+// The parser and the request builder are per-service instances rather than
+// shared ones: a parser holds the document it read, and a builder holds the
+// address and credential it sends to. Sharing either would let one upstream's
+// configuration answer for another.
+func (s *Server) buildService(service config.ServiceConfig, engine *security.Engine) (*mcp.Server, error) {
+	name := s.config.Server.Name
+	if service.Name != "" {
+		name = fmt.Sprintf("%s/%s", name, service.Name)
+	}
+	mcpServer := mcp.NewServer(&mcp.Implementation{
+		Name:    name,
+		Version: s.config.Server.Version,
+	}, nil)
+
+	specParser := parser.NewSwaggerParser(parser.NewAdjuster())
+	if err := specParser.Init(service.SwaggerFile, service.AdjustmentFile); err != nil {
+		return nil, fmt.Errorf("service %q: failed to initialize parser: %w", service.Name, err)
+	}
+
+	endpoint := service.Endpoint
+	upstream := requester.NewRequester(&endpoint,
+		requester.NewAuthManager(engine, service.UpstreamSecurity))
+
+	for _, route := range specParser.GetRouteTools() {
+		executor, err := upstream.BuildRouteExecutor(route.RouteConfig)
+		if err != nil {
+			logger.Error("Failed to build route executor",
+				zap.String("service", service.Name),
+				zap.String("tool", route.Tool.Name), zap.Error(err))
+			continue
+		}
+		mcpServer.AddTool(route.Tool, s.tool.CreateHandler(route.Tool, route.ResponseTemplate, executor))
+	}
+	return mcpServer, nil
 }
 
 func (s *Server) ServeSSE(ctx context.Context) error {
@@ -143,11 +182,32 @@ func (s *Server) ServeHTTP(ctx context.Context) error {
 // serverForRequest picks the MCP server that should handle an incoming request.
 //
 // Both HTTP transports resolve the server per request rather than binding one at
-// construction, which is the hook for serving several upstreams from one
-// process: this is where a lookup by request path (say /mcp/{merchant}) belongs.
-// Today there is a single spec, so every request gets the same server.
-func (s *Server) serverForRequest(*http.Request) *mcp.Server {
-	return s.mcp
+// construction, which is what lets one listener serve several upstreams. The
+// service is identified by the route segment after /mcp.
+func (s *Server) serverForRequest(r *http.Request) *mcp.Server {
+	if s.single != nil {
+		return s.single
+	}
+	return s.services[serviceNameFromPath(r.URL.Path)]
+}
+
+// serviceNameFromPath reads the service name out of /mcp/{name}/...
+func serviceNameFromPath(path string) string {
+	rest := strings.TrimPrefix(path, "/mcp")
+	rest = strings.TrimPrefix(rest, "/")
+	name, _, _ := strings.Cut(rest, "/")
+	return name
+}
+
+// ServiceNames returns the configured service names, for the HTTP handler to
+// route on. An empty name means the single-service form, which answers anywhere.
+func (s *Server) ServiceNames() []string {
+	names := make([]string, 0, len(s.services))
+	for name := range s.services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (s *Server) serveHTTP(ctx context.Context, handler http.Handler, mode string) error {
@@ -194,7 +254,11 @@ func (s *Server) serveHTTP(ctx context.Context, handler http.Handler, mode strin
 
 func (s *Server) ServeSTDIO(ctx context.Context) error {
 	logger.Info("Starting STDIO server")
-	return s.mcp.Run(ctx, &mcp.StdioTransport{})
+	// setupTools rejects several services in stdio mode, so exactly one exists.
+	for _, mcpServer := range s.services {
+		return mcpServer.Run(ctx, &mcp.StdioTransport{})
+	}
+	return fmt.Errorf("no service is configured")
 }
 
 // Start starts the server in the configured mode (SSE, HTTP, or STDIO).

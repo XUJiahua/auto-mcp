@@ -4,6 +4,7 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/brizzai/auto-mcp/internal/auth"
 	"github.com/brizzai/auto-mcp/internal/config"
@@ -17,15 +18,51 @@ type Handler struct {
 	auth       *auth.Service
 	security   *security.Engine
 	downstream *config.SecurityRequirement
+	// services is the set of route segments that exist. A single unnamed service
+	// is represented by the empty string and answers on any path.
+	services map[string]bool
 }
 
 // NewHandler creates a new HTTP handler.
-func NewHandler(auth *auth.Service, engine *security.Engine, downstream *config.SecurityRequirement) *Handler {
+func NewHandler(auth *auth.Service, engine *security.Engine,
+	downstream *config.SecurityRequirement, services []string) *Handler {
+
+	known := make(map[string]bool, len(services))
+	for _, name := range services {
+		known[name] = true
+	}
 	return &Handler{
 		auth:       auth,
 		security:   engine,
 		downstream: downstream,
+		services:   known,
 	}
+}
+
+// requireKnownService rejects a route that names no configured service.
+//
+// The SDK answers an unresolved server with 400 "no server available"; a missing
+// service is a wrong address, so it is reported as 404. Without this a typo in
+// the route would present as a service that exists and has no tools.
+func (h *Handler) requireKnownService(next http.Handler) http.Handler {
+	if h.services[""] {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !h.services[serviceNameFromPath(r.URL.Path)] {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// serviceNameFromPath reads the service name out of /mcp/{name}/...
+func serviceNameFromPath(path string) string {
+	rest := strings.TrimPrefix(path, "/mcp")
+	rest = strings.TrimPrefix(rest, "/")
+	name, _, _ := strings.Cut(rest, "/")
+	return name
 }
 
 // authenticateDownstream rejects callers that do not present the configured
@@ -59,22 +96,24 @@ func (h *Handler) CreateHTTPHandler(mcpHandler http.Handler) http.Handler {
 	mux := http.NewServeMux()
 
 	// Set up authentication routes and middleware if enabled
+	routed := h.requireKnownService(mcpHandler)
+
 	if h.auth != nil {
 		h.auth.RegisterRoutes(mux)
 		logger.Info("Registered authentication routes")
-		mux.Handle("/", h.auth.Authenticate()(mcpHandler))
+		mux.Handle("/", h.auth.Authenticate()(routed))
 		logger.Info("Enabled authentication for all routes")
 		return h.auth.WrapWithCors(mux)
 	}
 
 	if h.downstream != nil {
-		mux.Handle("/", h.authenticateDownstream(mcpHandler))
+		mux.Handle("/", h.authenticateDownstream(routed))
 		logger.Info("Enabled downstream authentication",
 			zap.String("scheme", h.downstream.ID))
 		return mux
 	}
 
-	mux.Handle("/", mcpHandler)
+	mux.Handle("/", routed)
 	logger.Info("Running without authentication")
 	return mux
 }

@@ -8,8 +8,6 @@ import (
 	"runtime/debug"
 
 	"github.com/brizzai/auto-mcp/internal/config"
-	"github.com/brizzai/auto-mcp/internal/parser"
-	"github.com/brizzai/auto-mcp/internal/requester"
 	"github.com/brizzai/auto-mcp/internal/server"
 
 	"github.com/brizzai/auto-mcp/internal/logger"
@@ -57,12 +55,9 @@ func main() {
 	// Create app with dependencies
 	app := fx.New(
 		fx.NopLogger,
-		parser.Module,
 		server.Module,
-		requester.Module,
 		// Config Provider
 		fx.Provide(func() *config.Config { return cfg }),
-		fx.Provide(func() *config.EndpointConfig { return &cfg.EndpointConfig }),
 		fx.Invoke(func(lc fx.Lifecycle, srv *server.Server) {
 			appCtx, cancel := context.WithCancel(context.Background())
 			lc.Append(fx.Hook{

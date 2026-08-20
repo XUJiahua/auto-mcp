@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,8 +11,6 @@ import (
 
 	"github.com/brizzai/auto-mcp/internal/config"
 	"github.com/brizzai/auto-mcp/internal/parser"
-	"github.com/brizzai/auto-mcp/internal/requester"
-	"github.com/brizzai/auto-mcp/internal/security"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -55,22 +52,13 @@ func TestNewMCPServer_SemiE2E(t *testing.T) {
 		},
 	}
 
-	// Parser & adjustments
-	adjuster := parser.NewAdjuster()
-	swaggerParser := parser.NewSwaggerParser(adjuster)
-
-	// HTTP requester (network will not actually be used – it is only needed for tool construction)
-	endpointCfg := &srvCfg.EndpointConfig
-	httpRequester := requester.NewHTTPRequester(requester.HTTPRequesterParams{
-		ServiceConfig: endpointCfg,
-		AuthManager:   requester.NewAuthManager(security.New(nil), nil),
-	})
-
 	// Create the MCP server under test
-	mcpSrv := NewServer(srvCfg, swaggerParser, httpRequester)
+	mcpSrv := NewServer(srvCfg)
 	require.NotNil(t, mcpSrv, "expected MCP server instance, got nil")
 
-	// Ensure that tools have been loaded according to the adjustments file
+	// Parse the same spec independently to inspect what was registered.
+	swaggerParser := parser.NewSwaggerParser(parser.NewAdjuster())
+	require.NoError(t, swaggerParser.Init(srvCfg.SwaggerFile, srvCfg.AdjustmentFile))
 	tools := swaggerParser.GetRouteTools()
 	assert.NotEmpty(t, tools, "expected route tools to be loaded, got 0")
 
@@ -209,19 +197,8 @@ func TestMCPServer_ListTools(t *testing.T) {
 		},
 	}
 
-	// Parser & adjustments
-	adjuster := parser.NewAdjuster()
-	swaggerParser := parser.NewSwaggerParser(adjuster)
-
-	// HTTP requester (network will not actually be used – it is only needed for tool construction)
-	endpointCfg := &srvCfg.EndpointConfig
-	httpRequester := requester.NewHTTPRequester(requester.HTTPRequesterParams{
-		ServiceConfig: endpointCfg,
-		AuthManager:   requester.NewAuthManager(security.New(nil), nil),
-	})
-
 	// Create the MCP server under test
-	mcpSrv := NewServer(srvCfg, swaggerParser, httpRequester)
+	mcpSrv := NewServer(srvCfg)
 	require.NotNil(t, mcpSrv, "expected MCP server instance, got nil")
 
 	// Create a context with cancellation for the server
@@ -377,17 +354,8 @@ func TestMCPServer_ContextCancellation(t *testing.T) {
 		},
 	}
 
-	// Create parser and requester
-	adjuster := parser.NewAdjuster()
-	swaggerParser := parser.NewSwaggerParser(adjuster)
-	endpointCfg := &srvCfg.EndpointConfig
-	httpRequester := requester.NewHTTPRequester(requester.HTTPRequesterParams{
-		ServiceConfig: endpointCfg,
-		AuthManager:   requester.NewAuthManager(security.New(nil), nil),
-	})
-
 	// Create the server
-	mcpSrv := NewServer(srvCfg, swaggerParser, httpRequester)
+	mcpSrv := NewServer(srvCfg)
 	require.NotNil(t, mcpSrv, "Failed to create MCP server")
 
 	// Create a context with cancellation
@@ -412,74 +380,6 @@ func TestMCPServer_ContextCancellation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Server did not shut down within timeout")
 	}
-}
-
-// TestMCPServer_ToolRegistration verifies that tools are correctly registered with the MCP server
-func TestMCPServer_ToolRegistration(t *testing.T) {
-	// Define a simple tool for testing
-	testTool := &mcp.Tool{
-		Name:        "test_tool",
-		Description: "Test tool",
-		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
-	}
-
-	// Create a mock parser that always returns our test tool
-	mockParser := &mockParser{
-		tools: []*parser.RouteTool{
-			{
-				RouteConfig: &requester.RouteConfig{
-					Path:   "/test",
-					Method: "GET",
-				},
-				Tool: testTool,
-			},
-		},
-	}
-
-	// Create a minimal configuration
-	srvCfg := &config.Config{
-		EndpointConfig: config.EndpointConfig{
-			BaseURL: "http://example.com",
-		},
-		Server: config.ServerConfig{
-			Mode: config.ServerModeSTDIO,
-		},
-	}
-
-	// Create HTTP requester
-	endpointCfg := &srvCfg.EndpointConfig
-	httpRequester := requester.NewHTTPRequester(requester.HTTPRequesterParams{
-		ServiceConfig: endpointCfg,
-		AuthManager:   requester.NewAuthManager(security.New(nil), nil),
-	})
-
-	// Create MCP server with our mock parser
-	mcpSrv := NewServer(srvCfg, mockParser, httpRequester)
-	require.NotNil(t, mcpSrv, "Failed to create MCP server")
-
-	// Since we can't directly access the tools registered in the MCP server,
-	// we can use reflection or just verify that the server was created successfully
-	// and our Init method was called, which shows the tools were processed
-	assert.True(t, mockParser.initCalled, "Parser Init method should have been called")
-}
-
-// mockParser implements the parser.Parser interface for testing
-type mockParser struct {
-	tools      []*parser.RouteTool
-	initCalled bool
-}
-
-func (m *mockParser) Init(openAPISpec string, adjustmentsFile string) error {
-	m.initCalled = true
-	return nil
-}
-
-func (m *mockParser) ParseReader(reader io.Reader) error {
-	return nil
-}
-
-func (m *mockParser) GetRouteTools() []*parser.RouteTool {
-	return m.tools
 }
 
 // toolProperties reads a tool's declared arguments. The SDK types InputSchema as

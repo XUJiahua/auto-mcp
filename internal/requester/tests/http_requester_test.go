@@ -163,10 +163,7 @@ func TestHTTPRequester(t *testing.T) {
 			tt.serviceConfig.BaseURL = server.URL
 
 			// Create the requester
-			requester := requester.NewHTTPRequester(requester.HTTPRequesterParams{
-				ServiceConfig: tt.serviceConfig,
-				AuthManager:   &MockAuthManager{},
-			})
+			requester := requester.NewRequester(tt.serviceConfig, &MockAuthManager{})
 
 			// Set timeout
 			requester.SetTimeout(tt.timeout)

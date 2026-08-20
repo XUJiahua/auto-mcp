@@ -10,7 +10,6 @@ import (
 	"github.com/brizzai/auto-mcp/internal/config"
 
 	"github.com/brizzai/auto-mcp/internal/logger"
-	"go.uber.org/fx"
 	"go.uber.org/zap"
 )
 
@@ -21,21 +20,12 @@ type HTTPRequester struct {
 	authMgr    AuthManager
 }
 
-type HTTPRequesterParams struct {
-	fx.In
-
-	ServiceConfig *config.EndpointConfig
-	AuthManager   AuthManager
-}
-
-// NewHTTPRequester creates a new HTTPRequester with default configuration
-func NewHTTPRequester(params HTTPRequesterParams) *HTTPRequester {
+// NewRequester creates a requester for one upstream.
+func NewRequester(endpoint *config.EndpointConfig, authManager AuthManager) *HTTPRequester {
 	return &HTTPRequester{
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-		serviceCfg: params.ServiceConfig,
-		authMgr:    params.AuthManager,
+		client:     &http.Client{Timeout: 30 * time.Second},
+		serviceCfg: endpoint,
+		authMgr:    authManager,
 	}
 }
 
