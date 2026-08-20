@@ -100,6 +100,11 @@ Add the following snippet to your **Claude Desktop** configuration (⟂ _Setting
 
 Claude will start the container on-demand and connect over STDIO. Replace the host path to `swagger.json` and image tag to suit your setup.
 
+### 使用手册
+
+完整的任务导向说明在 **[docs/USAGE.md](docs/USAGE.md)** —— 从五分钟跑起来、一个进程接多个
+API、不重启加 API、两侧鉴权、响应裁剪，到生成的工具长什么样与出错时怎么读。
+
 ### CLI flags
 
 - `--mode` – override `server.mode` (`stdio` or `sse`).

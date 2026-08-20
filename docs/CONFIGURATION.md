@@ -1,5 +1,8 @@
 # ⚙️ Configuration
 
+> 本文是配置项参考。想按任务读（怎么跑起来、怎么加 API、怎么排错），
+> 看 [USAGE.md](USAGE.md)。
+
 ## Configuration Options
 
 Auto MCP accepts configuration via **CLI flags**, **environment variables** (prefix `AUTO_MCP_`), or an optional `config.yaml`. In containerized deployments environment variables are the most convenient.
