@@ -166,7 +166,9 @@ func TestSwaggerParser_GenerateTool(t *testing.T) {
 		}
 
 		tool := parser.generateTool(route)
-		assert.Equal(t, "get_api_users_id", tool.Name)
+		// 名字来自 summary 而不是路径：真实文档常常写了 summary 却没有 operationId，
+		// 而 summary 是人写的动作短语，比 get_api_users_id 短也更好分类。
+		assert.Equal(t, "getUser", tool.Name)
 		assert.Contains(t, tool.Description, "Get user by ID")
 
 		// Check that path parameter is required
@@ -189,6 +191,7 @@ func TestSwaggerParser_GenerateTool(t *testing.T) {
 		}
 
 		tool := parser.generateTool(route)
+		// 这条 fixture 的操作没有 summary，所以退回路径派生。
 		assert.Equal(t, "post_api_users_id", tool.Name)
 		assert.Contains(t, tool.Description, "Create user")
 
@@ -426,7 +429,7 @@ func TestSwaggerParser_ProcessOperations(t *testing.T) {
 	}
 
 	assert.NotNil(t, postTool)
-	assert.Equal(t, "post_users", postTool.Tool.Name)
+	assert.Equal(t, "createUser", postTool.Tool.Name)
 	assert.Contains(t, postTool.Tool.Description, "Create a new user")
 
 	// Check body schema
@@ -609,7 +612,7 @@ func TestParseOpenAPISpecs(t *testing.T) {
 			validate: func(t *testing.T, p *SwaggerParser) {
 				tools := p.GetRouteTools()
 				assert.Len(t, tools, 1, "Should have one route")
-				assert.Equal(t, "get_test", tools[0].Tool.Name)
+				assert.Equal(t, "testEndpoint", tools[0].Tool.Name)
 				assert.Equal(t, "/test", tools[0].RouteConfig.Path)
 				assert.Equal(t, "GET", tools[0].RouteConfig.Method)
 			},
@@ -664,7 +667,7 @@ func TestParseOpenAPISpecs(t *testing.T) {
 			validate: func(t *testing.T, p *SwaggerParser) {
 				tools := p.GetRouteTools()
 				assert.Len(t, tools, 1, "Should have one route")
-				assert.Equal(t, "post_users_id", tools[0].Tool.Name)
+				assert.Equal(t, "createUser", tools[0].Tool.Name)
 				assert.Equal(t, "/users/{id}", tools[0].RouteConfig.Path)
 				assert.Equal(t, "POST", tools[0].RouteConfig.Method)
 
@@ -908,7 +911,7 @@ func TestParseComplexSpecs(t *testing.T) {
 
 		// Test GET /users
 		if getUsersTool, ok := routeMap["GET /users"]; ok {
-			assert.Equal(t, "get_users", getUsersTool.Tool.Name)
+			assert.Equal(t, "listUsers", getUsersTool.Tool.Name)
 			var queryNames []string
 			for _, cfg := range getUsersTool.RouteConfig.MethodConfig.Params {
 				if cfg.In == requester.ParamInQuery {
@@ -924,7 +927,7 @@ func TestParseComplexSpecs(t *testing.T) {
 
 		// Test POST /users
 		if postUsersTool, ok := routeMap["POST /users"]; ok {
-			assert.Equal(t, "post_users", postUsersTool.Tool.Name)
+			assert.Equal(t, "createUser", postUsersTool.Tool.Name)
 			// The media type is recorded so the builder can encode to match it;
 			// the Content-Type header is set from the encoding actually performed.
 			assert.Equal(t, "application/json", postUsersTool.RouteConfig.MethodConfig.BodyContentType)
@@ -934,7 +937,7 @@ func TestParseComplexSpecs(t *testing.T) {
 
 		// Test POST /users/{id}/files
 		if postFilesTool, ok := routeMap["POST /users/{id}/files"]; ok {
-			assert.Equal(t, "post_users_id_files", postFilesTool.Tool.Name)
+			assert.Equal(t, "uploadUserFile", postFilesTool.Tool.Name)
 			pathParams := extractPathParams(postFilesTool.RouteConfig.Path)
 			assert.Contains(t, pathParams, "id")
 		} else {

@@ -168,17 +168,30 @@ func methodAnnotations(method string) *mcp.ToolAnnotations {
 	}
 }
 
-// toolName prefers the operationId over method+path.
+// toolName prefers the operationId, then the summary, then method+path.
 //
 // For these APIs the name is the only place the operation's semantics survive:
 // reads and writes are both POST, so `post_api_createorder` and
 // `post_api_queryhotelinfo` are indistinguishable to anything downstream that
-// classifies tools, while `createOrder` and `queryHotelInfo` are not. The
-// method+path form stays as the fallback for specs without operationIds.
+// classifies tools, while `createOrder` and `queryHotelInfo` are not.
+//
+// The summary sits in the middle because real documents often omit operationId
+// while writing a summary for every operation — one measured document had a
+// summary on all 22 and an operationId on none. A summary is an action phrase
+// written by a person ("Cancel Standard Order"), so it yields both a shorter name
+// and a more classifiable one than a path: the derived `cancelStandardOrder`
+// starts with a word that marks it destructive, while the path form depends on the
+// route happening to contain that word somewhere.
+//
+// method+path remains the last resort. It is ugly — it carries the HTTP method and
+// an API version into a business name — but it is better than no name.
 func (p *SwaggerParser) toolName(route *requester.RouteConfig, operation *openapi3.Operation) string {
 	candidate := ""
 	if operation != nil {
 		candidate = sanitizeToolName(operation.OperationID)
+		if candidate == "" {
+			candidate = nameFromSummary(operation.Summary)
+		}
 	}
 	if candidate == "" {
 		path := strings.TrimPrefix(route.Path, "/")
@@ -188,6 +201,42 @@ func (p *SwaggerParser) toolName(route *requester.RouteConfig, operation *openap
 		candidate = strings.ToLower(fmt.Sprintf("%s_%s", route.Method, path))
 	}
 	return p.uniqueToolName(candidate)
+}
+
+// nameFromSummary turns an action phrase into a lowerCamelCase identifier.
+//
+// "Cancel Standard Order" becomes cancelStandardOrder. A summary that yields
+// nothing usable — one written entirely in Chinese, for instance — returns empty
+// so the caller falls back to the path rather than publishing a tool named after
+// a row of underscores.
+func nameFromSummary(summary string) string {
+	words := strings.FieldsFunc(summary, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
+	})
+	var b strings.Builder
+	for i, word := range words {
+		if i == 0 {
+			b.WriteString(strings.ToLower(word))
+			continue
+		}
+		b.WriteString(strings.ToUpper(word[:1]))
+		if len(word) > 1 {
+			// The rest is lowered so an all-caps summary does not become one long
+			// shout, but a word that is already mixed case keeps its shape.
+			if word == strings.ToUpper(word) {
+				b.WriteString(strings.ToLower(word[1:]))
+			} else {
+				b.WriteString(word[1:])
+			}
+		}
+	}
+	name := b.String()
+	// A leading digit is not a usable identifier, and a name of one or two
+	// characters says less than the path would.
+	if len(name) < 3 || name[0] >= '0' && name[0] <= '9' {
+		return ""
+	}
+	return name
 }
 
 // sanitizeToolName keeps letters, digits, underscore and dash and collapses
