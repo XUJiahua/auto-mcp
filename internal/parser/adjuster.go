@@ -102,6 +102,28 @@ func (a *Adjuster) ExistsInMCP(route, method string) bool {
 	return false // Path not found
 }
 
+// GetName returns the curated name for a route/method, empty when none is set.
+func (a *Adjuster) GetName(route, method string) string {
+	// nil 接收者也要安全：parser 可以在没有校订的情况下构造，而同一文件里
+	// ExistsInMCP 与 GetDescription 早就这么做了 —— 漏掉它会让"没有校订"变成崩溃。
+	if a == nil || a.adjustments == nil {
+		return ""
+	}
+	for _, desc := range a.adjustments.Descriptions {
+		if desc.Path != route {
+			continue
+		}
+		for _, update := range desc.Updates {
+			// Case-insensitive like the rest: OpenAPI spells path-item keys in lower
+			// case while hand-written files tend to use upper.
+			if strings.EqualFold(update.Method, method) && update.NewName != "" {
+				return update.NewName
+			}
+		}
+	}
+	return ""
+}
+
 // GetDescription returns the updated description for a route/method if it exists
 func (a *Adjuster) GetDescription(route, method, originalDesc string) string {
 	if a.adjustments == nil || len(a.adjustments.Descriptions) == 0 {

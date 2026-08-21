@@ -186,6 +186,12 @@ func methodAnnotations(method string) *mcp.ToolAnnotations {
 // method+path remains the last resort. It is ugly — it carries the HTTP method and
 // an API version into a business name — but it is better than no name.
 func (p *SwaggerParser) toolName(route *requester.RouteConfig, operation *openapi3.Operation) string {
+	// A curated name wins over anything derived: someone looked at this operation
+	// and decided. It is sanitised like an operationId because it arrives from a
+	// host's UI and may carry spaces or non-ASCII.
+	if curated := sanitizeToolName(p.adjuster.GetName(route.Path, route.Method)); curated != "" {
+		return p.uniqueToolName(curated)
+	}
 	candidate := ""
 	if operation != nil {
 		candidate = sanitizeToolName(operation.OperationID)

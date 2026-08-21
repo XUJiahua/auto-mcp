@@ -139,3 +139,72 @@ func TestNonASCIISummaryStillYieldsAUsableName(t *testing.T) {
 		t.Errorf("中文 summary 派生不出名字时该退回路径，得到 %q", name)
 	}
 }
+
+// 校订文件可以改工具名。
+//
+// 名字进 capability_id，而客户端会一直拿着它，所以宿主必须能在发布前定稿 ——
+// 而"定稿"要落在与选择、描述同一处，否则重启重建时又变回派生值。
+func TestAdjustmentCanRenameATool(t *testing.T) {
+	const spec = `{
+      "openapi": "3.1.0", "info": {"title": "T", "version": "1"},
+      "paths": {"/api/{lang}/nationality/list": {"post": {
+        "summary": "Query Nationality List",
+        "parameters": [{"name": "lang", "in": "path", "required": true,
+          "schema": {"type": "string"}}],
+        "responses": {"200": {"description": "OK"}}}}}}`
+
+	const adjustment = `
+descriptions:
+  - path: /api/{lang}/nationality/list
+    updates:
+      - method: post
+        new_name: listCountries
+        new_description: 列出可选国籍
+`
+	svc, err := automcp.Build(automcp.Options{
+		Spec:       strings.NewReader(spec),
+		Adjustment: strings.NewReader(adjustment),
+		BaseURL:    "https://x.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := svc.Tools()[0].Tool
+	if tool.Name != "listCountries" {
+		t.Errorf("工具名 = %q，校订应当能改名", tool.Name)
+	}
+	if !strings.Contains(tool.Description, "列出可选国籍") {
+		t.Errorf("描述 = %q", tool.Description)
+	}
+}
+
+// 改名要经过与 operationId 相同的清洗：宿主传来的名字可能带空格或中文。
+func TestAdjustmentRenameIsSanitised(t *testing.T) {
+	const spec = `{
+      "openapi": "3.1.0", "info": {"title": "T", "version": "1"},
+      "paths": {"/x": {"post": {"summary": "Do X",
+        "responses": {"200": {"description": "OK"}}}}}}`
+
+	const adjustment = `
+descriptions:
+  - path: /x
+    updates:
+      - method: post
+        new_name: "list countries 列表"
+`
+	svc, err := automcp.Build(automcp.Options{
+		Spec:       strings.NewReader(spec),
+		Adjustment: strings.NewReader(adjustment),
+		BaseURL:    "https://x.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := svc.Tools()[0].Tool.Name
+	for _, r := range name {
+		if r > 127 || r == ' ' {
+			t.Fatalf("名字没被清洗：%q", name)
+		}
+	}
+	if !strings.Contains(name, "list") {
+		t.Errorf("清洗后丢了内容：%q", name)
+	}
+}
