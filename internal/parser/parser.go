@@ -33,6 +33,17 @@ func NewSwaggerParser(adjuster *Adjuster) *SwaggerParser {
 }
 
 // GetRouteTools returns the parsed route tools
+// SetLenient turns on normalisation of documents that are conformant in substance
+// but not in letter. Off by default.
+func (p *SwaggerParser) SetLenient(on bool) { p.lenient = on }
+
+// Notices reports every change lenient mode made, one line each.
+func (p *SwaggerParser) Notices() []string {
+	out := make([]string, len(p.notices))
+	copy(out, p.notices)
+	return out
+}
+
 func (p *SwaggerParser) GetRouteTools() []*RouteTool {
 	return p.routeTools
 }
@@ -548,8 +559,27 @@ func extractPathParams(path string) []string {
 // does not implement it. A specification using lookahead is correct; refusing it
 // would reject a valid document for a limitation of this implementation. Both
 // real specifications measured use exactly that construct.
-func validateConformance(doc *openapi3.T) error {
-	if err := doc.Validate(context.Background(), openapi3.DisableSchemaPatternValidation()); err != nil {
+func validateConformance(doc *openapi3.T, lenient bool) error {
+	opts := []openapi3.ValidationOption{openapi3.DisableSchemaPatternValidation()}
+	if lenient {
+		// Examples are annotations: a tool's contract comes from type / properties /
+		// required, and an example only becomes a suggested value. A wrong example
+		// earns a rejection from the upstream, which is visible and fixable; a wrong
+		// type does not, so structural validation stays on either way.
+		opts = append(opts, openapi3.DisableExamplesValidation())
+	}
+	if err := doc.Validate(context.Background(), opts...); err != nil {
+		if !lenient {
+			// Point at the switch when it would have helped. Without this, every
+			// real document dead-ends here and nobody learns the option exists.
+			if doc.Validate(context.Background(),
+				openapi3.DisableSchemaPatternValidation(),
+				openapi3.DisableExamplesValidation()) == nil {
+				return fmt.Errorf("OpenAPI document does not conform to the specification: %w"+
+					" (this is an example value rather than a structural problem;"+
+					" it can be ignored with the lenient option / 可开启宽松模式忽略)", err)
+			}
+		}
 		return fmt.Errorf("OpenAPI document does not conform to the specification: %w", err)
 	}
 	return nil
@@ -614,6 +644,14 @@ func (p *SwaggerParser) detectAndParseOpenAPI(data []byte) error {
 		}
 	}
 
+	if p.lenient {
+		if renormalised, err := p.redeclareVersion(jsonObj, openapiVersion); err != nil {
+			return err
+		} else if renormalised != nil {
+			data = renormalised
+		}
+	}
+
 	loader := openapi3.NewLoader()
 	doc, err := loader.LoadFromData(data)
 	if err != nil {
@@ -625,13 +663,95 @@ func (p *SwaggerParser) detectAndParseOpenAPI(data []byte) error {
 		return fmt.Errorf("failed to parse OpenAPI spec: document is empty")
 	}
 
-	if err := validateConformance(doc); err != nil {
+	if err := validateConformance(doc, p.lenient); err != nil {
 		return err
+	}
+	if p.lenient {
+		// 只在示例校验真的救了这份文档时才报：合规的文档开着宽松也不该产生噪声，
+		// 否则"有报告"就不再意味着"有东西被改了"。
+		if strict := doc.Validate(context.Background(),
+			openapi3.DisableSchemaPatternValidation()); strict != nil {
+			p.notices = append(p.notices, fmt.Sprintf(
+				"example values were not validated; at least one disagrees with its schema: %v"+
+					" / 已跳过 example 校验，其中至少一处与声明不符：%v", strict, strict))
+		}
 	}
 
 	logger.Info("Successfully parsed OpenAPI spec", zap.String("version", doc.OpenAPI))
 	p.doc = doc
 	return nil
+}
+
+// redeclareVersion reads a document by what it uses rather than what it claims.
+//
+// A document that declares 3.0.x while using `type: "null"` or a list of types is
+// a 3.1 document with a wrong version line: those constructs exist only in 3.1,
+// and 3.0 spells the same thing `nullable: true`. Reading it as 3.1 makes more of
+// it meaningful, not less.
+//
+// This is a choice between two contradictory declarations, so it is always
+// reported. Returns nil when nothing needed changing.
+func (p *SwaggerParser) redeclareVersion(doc map[string]interface{}, version interface{}) ([]byte, error) {
+	declared, _ := version.(string)
+	if !strings.HasPrefix(declared, "3.0") {
+		return nil, nil
+	}
+	where, found := findJSONSchema31Construct(doc, "")
+	if !found {
+		return nil, nil
+	}
+
+	doc["openapi"] = "3.1.0"
+	p.notices = append(p.notices, fmt.Sprintf(
+		"document declares OpenAPI %s but uses the 3.1-only construct at %s;"+
+			" read as 3.1.0 / 文档声明 %s 却用了 3.1 独有的写法（%s），按 3.1.0 读取",
+		declared, where, declared, where))
+
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("failed to renormalise the spec after redeclaring its version: %w", err)
+	}
+	return out, nil
+}
+
+// findJSONSchema31Construct reports the first 3.1-only type construct, if any.
+//
+// Only the first: the notice exists to tell someone which line to look at, and a
+// list of two hundred paths would not help them do that.
+func findJSONSchema31Construct(node interface{}, path string) (string, bool) {
+	switch v := node.(type) {
+	case map[string]interface{}:
+		if t, ok := v["type"]; ok {
+			if s, isString := t.(string); isString && s == "null" {
+				return path + `.type = "null"`, true
+			}
+			if _, isList := t.([]interface{}); isList {
+				return path + ".type = [ … ]", true
+			}
+		}
+		for _, key := range sortedKeysOf(v) {
+			if where, found := findJSONSchema31Construct(v[key], path+"."+key); found {
+				return where, true
+			}
+		}
+	case []interface{}:
+		for i, item := range v {
+			if where, found := findJSONSchema31Construct(item, fmt.Sprintf("%s[%d]", path, i)); found {
+				return where, true
+			}
+		}
+	}
+	return "", false
+}
+
+// sortedKeysOf keeps the reported path deterministic across runs.
+func sortedKeysOf(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // convertOpenAPI2to3 converts an OpenAPI 2.0 specification to OpenAPI 3.0

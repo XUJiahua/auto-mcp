@@ -29,6 +29,15 @@ type Parser interface {
 
 // SwaggerParser parses Swagger specifications and generates route configurations
 type SwaggerParser struct {
+	// lenient normalises a document that is conformant in substance but not in
+	// letter. Off by default: nothing is changed unless a host asks for it.
+	lenient bool
+	// notices records every change lenient mode made, one line each.
+	//
+	// Ignoring a problem without saying so is the silent degradation this project
+	// refuses; reporting is what makes the leniency acceptable rather than a hole.
+	notices []string
+
 	doc        *openapi3.T
 	routeTools []*RouteTool
 	adjuster   *Adjuster

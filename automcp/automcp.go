@@ -65,6 +65,21 @@ type Options struct {
 	// carries what comes back.
 	Signer Signer
 
+	// Lenient normalises a document that is conformant in substance but not in
+	// letter, instead of refusing it. Off by default.
+	//
+	// It covers exactly two things, and both are reported by Notices:
+	//   - example / examples values that disagree with their schema. Those are
+	//     annotations: a tool's contract comes from type / properties / required,
+	//     and an example only becomes a suggested value.
+	//   - a document declaring 3.0.x while using 3.1-only type constructs. Such a
+	//     document is 3.1 with a wrong version line.
+	//
+	// Structural problems are still refused with it on. A wrong example earns a
+	// rejection from the upstream, which is visible and fixable; a wrong type does
+	// not — it publishes a tool that looks right and is not.
+	Lenient bool
+
 	// Timeout bounds a single upstream request. Zero uses the default.
 	Timeout time.Duration
 }
@@ -115,6 +130,7 @@ type Tool struct {
 type Service struct {
 	tools       []Tool
 	schemaBytes int
+	notices     []string
 }
 
 // Build parses the document and prepares its tools.
@@ -138,6 +154,7 @@ func Build(opts Options) (*Service, error) {
 	}
 
 	specParser := parser.NewSwaggerParser(adjuster)
+	specParser.SetLenient(opts.Lenient)
 	if err := specParser.ParseReader(opts.Spec); err != nil {
 		return nil, fmt.Errorf("automcp: %w", err)
 	}
@@ -158,7 +175,7 @@ func Build(opts Options) (*Service, error) {
 	// Auth is the host's concern, so the tool handler does no checking of its own.
 	handlers := tool.NewHandler(false)
 
-	service := &Service{}
+	service := &Service{notices: specParser.Notices()}
 	for _, route := range specParser.GetRouteTools() {
 		executor, err := upstream.BuildRouteExecutor(route.RouteConfig)
 		if err != nil {
@@ -195,6 +212,17 @@ func (s *Service) Register(server *mcp.Server) {
 func (s *Service) Tools() []Tool {
 	out := make([]Tool, len(s.tools))
 	copy(out, s.tools)
+	return out
+}
+
+// Notices reports what Lenient changed, one line each. Empty when nothing was.
+//
+// A host should show these to whoever uploaded the document: ignoring a problem
+// without saying so is the silent degradation that makes leniency a hole rather
+// than a convenience.
+func (s *Service) Notices() []string {
+	out := make([]string, len(s.notices))
+	copy(out, s.notices)
 	return out
 }
 
