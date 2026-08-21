@@ -723,6 +723,9 @@ func (p *SwaggerParser) processOperations() error {
 				routeConfig := p.createRouteConfig(path, httpMethod.Method, httpMethod.Operation)
 				if p.adjuster.ExistsInMCP(routeConfig.Path, routeConfig.Method) {
 					tool := p.generateTool(routeConfig)
+					// Record the exposed name on the route so a per-request signer
+					// can tell which tool it is signing for.
+					routeConfig.MethodConfig.ToolName = tool.Name
 					p.routeTools = append(p.routeTools, &RouteTool{
 						RouteConfig:      routeConfig,
 						Tool:             tool,

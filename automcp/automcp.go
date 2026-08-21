@@ -15,6 +15,7 @@
 package automcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,8 +52,45 @@ type Options struct {
 	// that gets rotated in only one of them.
 	Headers map[string]string
 
+	// Signer computes credentials that depend on the request itself. Optional.
+	//
+	// Headers above cover the common case: a fixed credential the host resolved
+	// once. A whole family of enterprise gateways cannot be served that way ——
+	// they authenticate with an HMAC over the canonical request (method, path,
+	// sorted query, body hash, timestamp, nonce, key), so the credential differs
+	// for every call and cannot exist before the body does.
+	//
+	// The division of labour is the same as for Headers: the host owns the secret
+	// and the algorithm, auto-mcp only tells it what is about to be sent and
+	// carries what comes back.
+	Signer Signer
+
 	// Timeout bounds a single upstream request. Zero uses the default.
 	Timeout time.Duration
+}
+
+// SigningRequest describes the request a Signer is about to sign.
+//
+// Everything here is what will actually be sent: Path has its placeholders
+// already substituted, and Body is the exact byte sequence that goes on the wire.
+// Signing anything else is the classic failure of this integration — a body
+// re-serialised with different key order or spacing hashes differently, so every
+// call is rejected for a reason that points nowhere near the cause.
+type SigningRequest = requester.SigningRequest
+
+// Signer computes per-request credentials.
+//
+// Returning an error stops the request. Sending it unsigned would only earn a
+// rejection from the upstream, and the real reason — a credential that could not
+// be read, a clock that was not available — would be lost on the way.
+type Signer = requester.Signer
+
+// SignerFunc adapts a plain function to Signer.
+type SignerFunc func(ctx context.Context, req SigningRequest) (map[string]string, error)
+
+// SignRequest implements Signer.
+func (f SignerFunc) SignRequest(ctx context.Context, req SigningRequest) (map[string]string, error) {
+	return f(ctx, req)
 }
 
 // Tool is a generated tool together with the handler that executes it.
@@ -112,6 +150,9 @@ func Build(opts Options) (*Service, error) {
 	)
 	if opts.Timeout > 0 {
 		upstream.SetTimeout(opts.Timeout)
+	}
+	if opts.Signer != nil {
+		upstream.SetSigner(opts.Signer)
 	}
 
 	// Auth is the host's concern, so the tool handler does no checking of its own.

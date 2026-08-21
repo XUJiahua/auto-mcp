@@ -28,6 +28,8 @@ type HTTPRequestBuilderParams struct {
 	EndpointConfig *config.EndpointConfig
 	AuthManager    AuthManager
 	RouteConfig    *RouteConfig
+	// Signer computes per-request credentials. Optional.
+	Signer Signer `optional:"true"`
 }
 
 // HTTPRequestBuilder implements the RequestBuilder interface
@@ -35,6 +37,8 @@ type HTTPRequestBuilder struct {
 	serviceCfg  *config.EndpointConfig
 	authMgr     AuthManager
 	routeConfig *RouteConfig
+	// signer computes per-request credentials, nil when the upstream needs none.
+	signer Signer
 }
 
 // NewHTTPRequestBuilder creates a new HTTPRequestBuilder
@@ -43,6 +47,7 @@ func NewHTTPRequestBuilder(params HTTPRequestBuilderParams) *HTTPRequestBuilder 
 		serviceCfg:  params.EndpointConfig,
 		authMgr:     params.AuthManager,
 		routeConfig: params.RouteConfig,
+		signer:      params.Signer,
 	}
 }
 
@@ -73,10 +78,15 @@ func (b *HTTPRequestBuilder) BuildRequest(ctx context.Context, params map[string
 	}
 	url = b.addQueryParams(url, params, byLocation)
 
-	// Create request body
-	body, contentType, err := b.createRequestBody(b.routeConfig, params)
+	// Create request body. The bytes are kept, not just a reader: a signature is
+	// computed over exactly these bytes, and a reader is consumed by the first read.
+	bodyBytes, contentType, err := b.createRequestBody(b.routeConfig, params)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request body: %w", err)
+	}
+	var body io.Reader
+	if len(bodyBytes) > 0 {
+		body = bytes.NewReader(bodyBytes)
 	}
 
 	// Merge headers
@@ -133,6 +143,27 @@ func (b *HTTPRequestBuilder) BuildRequest(ctx context.Context, params map[string
 	// Apply authentication
 	if err := b.authMgr.ApplyAuth(httpReq); err != nil {
 		return nil, fmt.Errorf("failed to apply authentication: %w", err)
+	}
+
+	// Sign last, over the request as it will actually be sent. Anything added
+	// after this point would not be covered by the signature, and the mismatch
+	// would only show up as a rejection from the upstream.
+	if b.signer != nil {
+		signed, err := b.signer.SignRequest(ctx, SigningRequest{
+			Method:      httpReq.Method,
+			Path:        httpReq.URL.Path,
+			Query:       httpReq.URL.RawQuery,
+			Body:        bodyBytes,
+			ContentType: contentType,
+			Tool:        b.routeConfig.MethodConfig.ToolName,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to sign request: %w", err)
+		}
+		for key, value := range signed {
+			httpReq.Header.Set(key, value)
+			headers[key] = value
+		}
 	}
 
 	return &Request{
@@ -401,7 +432,7 @@ func flattenParamValue(value any) []string {
 // claiming JSON. Upstreams that reject unexpected DELETE bodies failed for a
 // reason pointing nowhere near the cause, and intermediaries are free to drop
 // such a body entirely.
-func (b *HTTPRequestBuilder) createRequestBody(routeConfig *RouteConfig, params map[string]interface{}) (io.Reader, string, error) {
+func (b *HTTPRequestBuilder) createRequestBody(routeConfig *RouteConfig, params map[string]interface{}) ([]byte, string, error) {
 	if routeConfig.MethodConfig.FileUpload != nil {
 		return b.createMultipartBody(routeConfig, params)
 	}
@@ -423,7 +454,7 @@ func (b *HTTPRequestBuilder) createRequestBody(routeConfig *RouteConfig, params 
 // Content-Type: application/json, so a form-encoded endpoint received JSON while
 // being told it was form data, and the upstream rejected it for reasons that
 // pointed nowhere near the cause.
-func encodeBody(body any, mediaType string) (io.Reader, string, error) {
+func encodeBody(body any, mediaType string) ([]byte, string, error) {
 	switch {
 	case mediaType == "application/x-www-form-urlencoded":
 		fields, ok := body.(map[string]any)
@@ -436,13 +467,13 @@ func encodeBody(body any, mediaType string) (io.Reader, string, error) {
 				values.Add(name, item)
 			}
 		}
-		return strings.NewReader(values.Encode()), mediaType, nil
+		return []byte(values.Encode()), mediaType, nil
 
 	case isTextualMediaType(mediaType):
 		// A textual body given as a string is sent as written; wrapping it in JSON
 		// quotes would change the bytes the upstream reads.
 		if text, ok := body.(string); ok {
-			return strings.NewReader(text), mediaType, nil
+			return []byte(text), mediaType, nil
 		}
 	}
 
@@ -456,12 +487,12 @@ func encodeBody(body any, mediaType string) (io.Reader, string, error) {
 		// reported here rather than left for the upstream to discover.
 		logger.Warn("Request body media type is not supported; sending JSON",
 			zap.String("declared", mediaType))
-		return bytes.NewBuffer(jsonData), "application/json", nil
+		return jsonData, "application/json", nil
 	}
 	if mediaType == "" {
 		mediaType = "application/json"
 	}
-	return bytes.NewBuffer(jsonData), mediaType, nil
+	return jsonData, mediaType, nil
 }
 
 func isJSONMediaType(mediaType string) bool {
@@ -481,7 +512,7 @@ func sortedKeys(m map[string]any) []string {
 	return out
 }
 
-func (b *HTTPRequestBuilder) createMultipartBody(routeConfig *RouteConfig, params map[string]interface{}) (io.Reader, string, error) {
+func (b *HTTPRequestBuilder) createMultipartBody(routeConfig *RouteConfig, params map[string]interface{}) ([]byte, string, error) {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
@@ -509,5 +540,5 @@ func (b *HTTPRequestBuilder) createMultipartBody(routeConfig *RouteConfig, param
 		return nil, "", fmt.Errorf("failed to close multipart writer: %w", err)
 	}
 
-	return body, writer.FormDataContentType(), nil
+	return body.Bytes(), writer.FormDataContentType(), nil
 }

@@ -60,6 +60,12 @@ type MethodConfig struct {
 	// Params carries every declared parameter with its location.
 	Params []ParamConfig `json:"params,omitempty"`
 
+	// ToolName is the name this operation is exposed as.
+	//
+	// Recorded here so a Signer can tell which tool it is signing for: some
+	// schemes include the operation name in the signed string, and the signer is
+	// one hook for the whole service, so it cannot know otherwise.
+	ToolName string `json:"tool_name,omitempty"`
 	// BodyContentType is the media type the spec declared for the request body.
 	// The builder encodes the body to match it, so that the bytes on the wire and
 	// the Content-Type header cannot disagree.
