@@ -3,11 +3,14 @@ package parser
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -645,9 +648,18 @@ func (p *SwaggerParser) detectAndParseOpenAPI(data []byte) error {
 	}
 
 	if p.lenient {
-		if renormalised, err := p.redeclareVersion(jsonObj, openapiVersion); err != nil {
-			return err
-		} else if renormalised != nil {
+		changed := false
+		if p.redeclareVersionIn(jsonObj, openapiVersion) {
+			changed = true
+		}
+		if p.renameNonASCIIComponents(jsonObj) {
+			changed = true
+		}
+		if changed {
+			renormalised, err := json.Marshal(jsonObj)
+			if err != nil {
+				return fmt.Errorf("failed to renormalise the spec: %w", err)
+			}
 			data = renormalised
 		}
 	}
@@ -691,14 +703,14 @@ func (p *SwaggerParser) detectAndParseOpenAPI(data []byte) error {
 //
 // This is a choice between two contradictory declarations, so it is always
 // reported. Returns nil when nothing needed changing.
-func (p *SwaggerParser) redeclareVersion(doc map[string]interface{}, version interface{}) ([]byte, error) {
+func (p *SwaggerParser) redeclareVersionIn(doc map[string]interface{}, version interface{}) bool {
 	declared, _ := version.(string)
 	if !strings.HasPrefix(declared, "3.0") {
-		return nil, nil
+		return false
 	}
 	where, found := findJSONSchema31Construct(doc, "")
 	if !found {
-		return nil, nil
+		return false
 	}
 
 	doc["openapi"] = "3.1.0"
@@ -706,12 +718,118 @@ func (p *SwaggerParser) redeclareVersion(doc map[string]interface{}, version int
 		"document declares OpenAPI %s but uses the 3.1-only construct at %s;"+
 			" read as 3.1.0 / 文档声明 %s 却用了 3.1 独有的写法（%s），按 3.1.0 读取",
 		declared, where, declared, where))
+	return true
+}
 
-	out, err := json.Marshal(doc)
-	if err != nil {
-		return nil, fmt.Errorf("failed to renormalise the spec after redeclaring its version: %w", err)
+// componentNameCharset is what OpenAPI allows for keys under components.
+var componentNameCharset = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+// renameNonASCIIComponents gives conformant names to components named in Chinese
+// or any other charset the specification does not allow.
+//
+// A component name is only an anchor for $ref: it appears in no request, no
+// response, and no tool contract. Renaming it — with every reference rewritten to
+// match — changes nothing about what the document means, which is what puts it in
+// the same class as ignoring a bad example rather than in the class of guessing at
+// a mistyped structural keyword.
+//
+// Naming schemas in Chinese is common in documents exported by Chinese tooling;
+// one real document had all seven of its schemas named that way, and refusing it
+// meant the merchant could not be onboarded at all.
+func (p *SwaggerParser) renameNonASCIIComponents(doc map[string]interface{}) bool {
+	components, ok := doc["components"].(map[string]interface{})
+	if !ok {
+		return false
 	}
-	return out, nil
+
+	renames := map[string]string{}
+	for _, section := range sortedKeysOf(components) {
+		items, ok := components[section].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		taken := map[string]bool{}
+		for name := range items {
+			taken[name] = true
+		}
+		for _, name := range sortedKeysOf(items) {
+			if componentNameCharset.MatchString(name) {
+				continue
+			}
+			replacement := conformantName(name, taken)
+			taken[replacement] = true
+			items[replacement] = items[name]
+			delete(items, name)
+			renames[fmt.Sprintf("#/components/%s/%s", section, name)] =
+				fmt.Sprintf("#/components/%s/%s", section, replacement)
+			p.notices = append(p.notices, fmt.Sprintf(
+				"component %s.%s was renamed to %s: OpenAPI allows only [a-zA-Z0-9._-]"+
+					" in component names / 组件 %s.%s 改名为 %s（规范只允许 [a-zA-Z0-9._-]）",
+				section, name, replacement, section, name, replacement))
+		}
+	}
+	if len(renames) == 0 {
+		return false
+	}
+	rewriteRefs(doc, renames)
+	return true
+}
+
+// conformantName derives a usable name, keeping any ASCII the original had.
+//
+// A name derived from the original is worth the effort over a counter: it appears
+// in error messages and in $ref, and "schema_3" tells whoever is reading them
+// nothing about which schema went wrong.
+func conformantName(original string, taken map[string]bool) string {
+	var b strings.Builder
+	for _, r := range original {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			// One underscore per run of unusable characters, so a fully non-ASCII
+			// name does not become a row of underscores.
+			if s := b.String(); s != "" && !strings.HasSuffix(s, "_") {
+				b.WriteByte('_')
+			}
+		}
+	}
+	stem := strings.Trim(b.String(), "_")
+	if stem == "" {
+		stem = "Schema"
+	}
+	// Keep it stable and unique: the same input always yields the same name, and a
+	// collision appends a counter rather than silently overwriting a sibling.
+	sum := sha1.Sum([]byte(original))
+	candidate := fmt.Sprintf("%s_%s", stem, hex.EncodeToString(sum[:])[:8])
+	for i := 2; taken[candidate]; i++ {
+		candidate = fmt.Sprintf("%s_%s_%d", stem, hex.EncodeToString(sum[:])[:8], i)
+	}
+	return candidate
+}
+
+// rewriteRefs points every $ref at its component's new name.
+//
+// Missing one would turn a renamed component into a dangling reference, which the
+// loader reports as a missing schema — an error pointing at the rename rather than
+// at the document, and far from the original name anyone would search for.
+func rewriteRefs(node interface{}, renames map[string]string) {
+	switch v := node.(type) {
+	case map[string]interface{}:
+		if ref, ok := v["$ref"].(string); ok {
+			if replacement, found := renames[ref]; found {
+				v["$ref"] = replacement
+			}
+		}
+		for _, value := range v {
+			rewriteRefs(value, renames)
+		}
+	case []interface{}:
+		for _, item := range v {
+			rewriteRefs(item, renames)
+		}
+	}
 }
 
 // findJSONSchema31Construct reports the first 3.1-only type construct, if any.

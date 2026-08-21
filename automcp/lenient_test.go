@@ -1,6 +1,7 @@
 package automcp_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -120,5 +121,56 @@ func TestLenientStillRefusesStructuralProblems(t *testing.T) {
 	if _, err := automcp.Build(automcp.Options{
 		Spec: strings.NewReader(structural), BaseURL: "https://x.test", Lenient: true}); err == nil {
 		t.Error("3.0 里缺 responses 是结构性问题，宽松模式也该拒")
+	}
+}
+
+// 组件名用了中文（或其它非 ASCII）时，宽松模式改名而不是拒。
+//
+// OpenAPI 规定 components 下的键只能是 [a-zA-Z0-9._-]。而用中文命名 schema 在国内的
+// 文档工具里很常见（apifox 导出就是这样），本次那份 21 个操作的文档里 7 个 schema
+// 全是中文名。
+//
+// 名字只是 $ref 的锚点：它不进工具契约，也不出现在任何请求或响应里。改名只要把引用
+// 一起改，语义分毫不动 —— 与"忽略示例值"同一类，都是字面不合规而实质无害。
+const chineseComponentNames = `{
+  "openapi": "3.1.0",
+  "info": {"title": "T", "version": "1"},
+  "paths": {"/x": {"post": {
+    "operationId": "doX",
+    "requestBody": {"required": true, "content": {"application/json": {"schema": {
+      "type": "object",
+      "properties": {"停靠": {"$ref": "#/components/schemas/经停信息"}}}}}},
+    "responses": {"200": {"description": "OK"}}}}},
+  "components": {"schemas": {"经停信息": {
+    "type": "object",
+    "properties": {"city": {"type": "string", "description": "经停城市"}}}}}}`
+
+func TestStrictRefusesNonASCIIComponentNames(t *testing.T) {
+	if _, err := automcp.Build(automcp.Options{
+		Spec: strings.NewReader(chineseComponentNames), BaseURL: "https://x.test"}); err == nil {
+		t.Error("默认严格：不合规的组件名应当被拒")
+	}
+}
+
+func TestLenientRenamesNonASCIIComponents(t *testing.T) {
+	svc, err := automcp.Build(automcp.Options{
+		Spec: strings.NewReader(chineseComponentNames), BaseURL: "https://x.test", Lenient: true})
+	if err != nil {
+		t.Fatalf("开启宽松后应当通过: %v", err)
+	}
+	if len(svc.Tools()) != 1 {
+		t.Fatalf("工具数 = %d", len(svc.Tools()))
+	}
+
+	// 改名不能丢内容：引用必须跟着改，被引用的字段要照样出现在工具契约里。
+	schema := svc.Tools()[0].Tool.InputSchema
+	encoded := fmt.Sprint(schema)
+	if !strings.Contains(encoded, "经停城市") {
+		t.Errorf("改名丢掉了被引用的内容：%.400s", encoded)
+	}
+
+	joined := strings.Join(svc.Notices(), " | ")
+	if !strings.Contains(joined, "经停信息") {
+		t.Errorf("报告没说清改了哪个名字：%s", joined)
 	}
 }
