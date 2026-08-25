@@ -1,7 +1,18 @@
 package models
 
 type RouteFieldUpdate struct {
-	Method         string `yaml:"method"`
+	Method string `yaml:"method"`
+	// NewName replaces the tool's derived name.
+	//
+	// The name is not cosmetic: a model reads it, a host usually builds an
+	// identifier out of it that clients then hold on to, and anything downstream
+	// that classifies operations has only the name to go on when reads and writes
+	// are both POST. So whoever curates a document has to be able to settle it
+	// here, next to the selection and the descriptions, rather than only in
+	// whatever screen happened to show it.
+	// omitempty：这个字段是后加的，不带它会让导出的校订文件里每条都多一行
+	// new_name: ""，而那份文件是给人读、也是要 diff 的。
+	NewName        string `yaml:"new_name,omitempty"`
 	NewDescription string `yaml:"new_description"`
 }
 

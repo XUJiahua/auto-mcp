@@ -444,3 +444,107 @@ visa     REJECT  invalid components: schema "Address": extra sibling fields: [ex
 **代价:本仓自己的测试夹具有 4 处不合规**(`/users/{id}` 的 GET/PUT/DELETE 与 `/users` 的 POST
 都缺 `responses`,而它是必填项),校验一开就红了。已补齐 —— 这本身就是这项校验的第一份
 收益:它先抓到的是我们自己。
+
+## 17. 作为共享库嵌入
+
+需求:merchant-hub 后端在**进程内**用 auto-mcp 暴露能力,前端引导用户上传 OpenAPI
+文档,录入成功即成为 MCP 服务。三个已定的选择:进程内 MCP 一跳、spec 存 SQLite 经
+`ParseReader` 读入、库化改造独立成一个 PR。
+
+**做法与最初的分析不同。** 我先前建议"把 parser 等 6 个包从 `internal/` 提出来",那是错的:
+
+- 会把 `internal/config`(装着 viper、`ServerConfig`、`OAuthConfig`)变成宿主的编译期依赖;
+- 会把 `internal/logger` 的**全局单例**变成两个应用共享的可变全局;
+- 会导出约 50 个符号,而宿主实际需要 5 个 —— 之后每次内部重构都是宿主的破坏性变更。
+
+改为**一个门面包 `automcp`**,`internal/*` 一个都不外露。对外只有:
+
+```go
+type Options struct { Spec, Adjustment io.Reader; BaseURL string; Headers map[string]string; Timeout time.Duration }
+type Service struct{ ... }
+type Tool    struct{ Tool *mcp.Tool; Handler mcp.ToolHandler }
+func Build(Options) (*Service, error)
+func (*Service) Register(*mcp.Server); Tools() []Tool; SchemaBytes() int
+```
+
+分工:**文档来源、`mcp.Server` 的归属、对外服务方式、凭证解析,全归宿主。** 这个包只解析、
+构建、交出工具。`Headers` 是凭证的落点 —— 宿主解析后交过来,`automcp` 只负责携带,
+所以凭证只有一个家。
+
+`Build` 不发请求,可以只为**预览**而构建:`Tools()` 看工具面、`SchemaBytes()` 看体积、
+不合规直接返回错误。上传界面需要的正是这个。
+
+**两边共用同一个 MCP SDK(`go-sdk v1.7.0`)是这件事可行的前提**,而那是 #15 换库的副产品:
+在 mark3labs 时代两边的 `mcp.Tool` 是不同类型,共享得写一整层转换。
+
+实测(在 merchant-hub 里 import,**它的现有代码一行未改**):
+
+```
+① Build:        tools=1  schema=412B
+② introspect:   server="merchant-hub/hotel" tools=1     ← 经它自己的 gateway
+③ derive:       verb=query-hotel-info read=true
+                flags=[hotel-id[string,path=body.businessRequest.hotelId,ex="H12345"]]
+④ 上游实收:     {"businessRequest":{"hotelId":"H12345"},
+                 "header":{"partnerCode":"P0001","sign":"C99C0AAC…"}}
+```
+
+第 ④ 步要紧:签名字段仍由 **merchant-hub 的凭证引擎**注入到 `body.header`,穿过
+in-process 的 auto-mcp 原样落到上游。九个元工具、derive、exec、Agent 探索、门禁全部不用改,
+因为它们看到的仍然是一个 MCP server。
+
+### 建这一层时撞出的两个缺陷(已修)
+
+- **校订文件的方法名比较是大小写敏感的。** `ExistsInMCP` 与 `GetDescription` 用 `==`
+  比较方法名,而 parser 传的是 `"GET"`。官方示例写 `POST` 能用,而 OpenAPI 自己的
+  path-item 键是小写 —— **写 `methods: [get]` 会静默产出零个工具**,一个什么都选不中的
+  过滤器和一份没有路由的文档无法区分。我自己刚写的 USAGE.md 里就是小写。三处比较统一
+  改为 `strings.EqualFold`(其中响应模板那处本来就是,同一个文件里两种行为)。
+- **工具顺序不确定。** `processOperations` 直接遍历 paths 的 map,每次运行发布的顺序都不同。
+  对正确性无影响,但抓下来的 `tools/list` 无法 diff,按位置寻址的消费方也会看到工具移位。
+  现在按路径排序后遍历。
+
+### 用公开 Petstore 跑真链路时撞出的两个缺陷(已修)
+
+两个都属于同一类:**发出文档没有声明的东西**。它们的症状都出现在离原因很远的地方。
+
+- **未声明的参数被静默塞进查询串。** 这是从上游继承的行为,注释里还写着"保留原有行为"。
+  代价是把调用方的笔误变成一个悄悄跑偏的请求:调用方多半是模型,它编一个参数名出来,
+  拿到的是一个忽略了它的 200,或者一句指向别处的拒绝。我自己就被骗了一轮 —— 把
+  `updatePetWithForm` 的字段传扁了,看到的是"空 body + 查询串",于是误判成 `formData`
+  转换坏了,而实际上转换是对的。现在拒绝,并且**把可接受的参数名列在错误里**:
+  模型能照那份清单自我纠正,照"unknown argument"不能。
+- **`DELETE /pet/{petId}` 会把 `{"petId":10}` 当 JSON 请求体寄出去。** 那个路径参数已经
+  填进 URL 了,又被当成文档从未提到的请求体发一遍,还带上一个声称 JSON 的 Content-Type。
+  原因是 `createRequestBody` 对 GET/POST/PUT/PATCH 之外的方法一律"把全部参数序列化成
+  JSON"。拒绝未声明的 DELETE 请求体的上游会失败,而失败原因指向别处;中间层也可以直接
+  把这种 body 丢掉。现在**以文档为准而不是以方法名为准**:`BodyContentType` 恰好在文档
+  声明了请求体时被设上,所以它直接回答这个问题 —— OpenAPI 允许 DELETE 带体,也不强制
+  POST 带体。实测两份 Petstore 文档共 16 个带 body 的操作,`BodyContentType` 无一缺失。
+
+  既有测试里有四处手搓的路由靠着旧行为(不声明参数却传参数、不声明媒体类型却发体)。
+  它们在断言这两个缺陷,一并更新了 —— 顺带让"文档没声明"与"fixture 忘了写"不再混同。
+
+### 按请求签名(`Options.Signer`)
+
+`Headers` 覆盖的是"宿主解析过一次的固定凭证"。有一整类企业网关不能这样接:它们用
+**对规范化请求做 HMAC** 来鉴权 —— METHOD、PATH、排序后的 query、body 的 SHA256、
+时间戳、nonce、appKey 拼起来签。这些量没有一个能在建 service 或建会话时算好:
+它依赖正要发出的那些字节,而时间戳与 nonce 每次都必须不同。
+
+`Options.Signer` 因此在**请求定型之后、发出之前**被调用,拿到的 `SigningRequest` 里
+`Path` 已替换过占位符、`Body` 就是将要发出的那串字节。签一份重新序列化过的 body
+(键序变了、空格变了)会让每次调用都被判签名错误,而错误信息指不出哪里不一致 ——
+那是这类集成最典型的失败方式,所以这一条由测试钉住。
+
+签名器返回错误就不发请求。发一个未签名的请求只会换来上游一句签名错误,
+而真正的原因(凭证取不到、时钟不可用)就此丢失。
+
+分工与 `Headers` 一致:宿主拥有密钥与算法,auto-mcp 只告诉它要发什么、并把返回的头带上。
+
+### 仍待处理
+
+- merchant-hub 侧的接入:录入向导第一步加"来源"分叉(已有 MCP 地址 / OpenAPI 文档),
+  而不是新开板块 —— 后三步(预览、校订、发布、探索)两种来源完全相同。
+- `HUB_ENVIRONMENT=production` 拒绝一切探索这条不变量要覆盖新来源。
+- 凭证轮换目前需要重建 service(`Headers` 在 Build 时固定)。需要热轮换时,
+  给 `Options` 加一个按调用取头的钩子。

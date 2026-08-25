@@ -3,11 +3,14 @@ package parser
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -33,6 +36,17 @@ func NewSwaggerParser(adjuster *Adjuster) *SwaggerParser {
 }
 
 // GetRouteTools returns the parsed route tools
+// SetLenient turns on normalisation of documents that are conformant in substance
+// but not in letter. Off by default.
+func (p *SwaggerParser) SetLenient(on bool) { p.lenient = on }
+
+// Notices reports every change lenient mode made, one line each.
+func (p *SwaggerParser) Notices() []string {
+	out := make([]string, len(p.notices))
+	copy(out, p.notices)
+	return out
+}
+
 func (p *SwaggerParser) GetRouteTools() []*RouteTool {
 	return p.routeTools
 }
@@ -154,17 +168,36 @@ func methodAnnotations(method string) *mcp.ToolAnnotations {
 	}
 }
 
-// toolName prefers the operationId over method+path.
+// toolName prefers the operationId, then the summary, then method+path.
 //
 // For these APIs the name is the only place the operation's semantics survive:
 // reads and writes are both POST, so `post_api_createorder` and
 // `post_api_queryhotelinfo` are indistinguishable to anything downstream that
-// classifies tools, while `createOrder` and `queryHotelInfo` are not. The
-// method+path form stays as the fallback for specs without operationIds.
+// classifies tools, while `createOrder` and `queryHotelInfo` are not.
+//
+// The summary sits in the middle because real documents often omit operationId
+// while writing a summary for every operation — one measured document had a
+// summary on all 22 and an operationId on none. A summary is an action phrase
+// written by a person ("Cancel Standard Order"), so it yields both a shorter name
+// and a more classifiable one than a path: the derived `cancelStandardOrder`
+// starts with a word that marks it destructive, while the path form depends on the
+// route happening to contain that word somewhere.
+//
+// method+path remains the last resort. It is ugly — it carries the HTTP method and
+// an API version into a business name — but it is better than no name.
 func (p *SwaggerParser) toolName(route *requester.RouteConfig, operation *openapi3.Operation) string {
+	// A curated name wins over anything derived: someone looked at this operation
+	// and decided. It is sanitised like an operationId because it arrives from a
+	// host's UI and may carry spaces or non-ASCII.
+	if curated := sanitizeToolName(p.adjuster.GetName(route.Path, route.Method)); curated != "" {
+		return p.uniqueToolName(curated)
+	}
 	candidate := ""
 	if operation != nil {
 		candidate = sanitizeToolName(operation.OperationID)
+		if candidate == "" {
+			candidate = nameFromSummary(operation.Summary)
+		}
 	}
 	if candidate == "" {
 		path := strings.TrimPrefix(route.Path, "/")
@@ -174,6 +207,42 @@ func (p *SwaggerParser) toolName(route *requester.RouteConfig, operation *openap
 		candidate = strings.ToLower(fmt.Sprintf("%s_%s", route.Method, path))
 	}
 	return p.uniqueToolName(candidate)
+}
+
+// nameFromSummary turns an action phrase into a lowerCamelCase identifier.
+//
+// "Cancel Standard Order" becomes cancelStandardOrder. A summary that yields
+// nothing usable — one written entirely in Chinese, for instance — returns empty
+// so the caller falls back to the path rather than publishing a tool named after
+// a row of underscores.
+func nameFromSummary(summary string) string {
+	words := strings.FieldsFunc(summary, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
+	})
+	var b strings.Builder
+	for i, word := range words {
+		if i == 0 {
+			b.WriteString(strings.ToLower(word))
+			continue
+		}
+		b.WriteString(strings.ToUpper(word[:1]))
+		if len(word) > 1 {
+			// The rest is lowered so an all-caps summary does not become one long
+			// shout, but a word that is already mixed case keeps its shape.
+			if word == strings.ToUpper(word) {
+				b.WriteString(strings.ToLower(word[1:]))
+			} else {
+				b.WriteString(word[1:])
+			}
+		}
+	}
+	name := b.String()
+	// A leading digit is not a usable identifier, and a name of one or two
+	// characters says less than the path would.
+	if len(name) < 3 || name[0] >= '0' && name[0] <= '9' {
+		return ""
+	}
+	return name
 }
 
 // sanitizeToolName keeps letters, digits, underscore and dash and collapses
@@ -548,8 +617,27 @@ func extractPathParams(path string) []string {
 // does not implement it. A specification using lookahead is correct; refusing it
 // would reject a valid document for a limitation of this implementation. Both
 // real specifications measured use exactly that construct.
-func validateConformance(doc *openapi3.T) error {
-	if err := doc.Validate(context.Background(), openapi3.DisableSchemaPatternValidation()); err != nil {
+func validateConformance(doc *openapi3.T, lenient bool) error {
+	opts := []openapi3.ValidationOption{openapi3.DisableSchemaPatternValidation()}
+	if lenient {
+		// Examples are annotations: a tool's contract comes from type / properties /
+		// required, and an example only becomes a suggested value. A wrong example
+		// earns a rejection from the upstream, which is visible and fixable; a wrong
+		// type does not, so structural validation stays on either way.
+		opts = append(opts, openapi3.DisableExamplesValidation())
+	}
+	if err := doc.Validate(context.Background(), opts...); err != nil {
+		if !lenient {
+			// Point at the switch when it would have helped. Without this, every
+			// real document dead-ends here and nobody learns the option exists.
+			if doc.Validate(context.Background(),
+				openapi3.DisableSchemaPatternValidation(),
+				openapi3.DisableExamplesValidation()) == nil {
+				return fmt.Errorf("OpenAPI document does not conform to the specification: %w"+
+					" (this is an example value rather than a structural problem;"+
+					" it can be ignored with the lenient option / 可开启宽松模式忽略)", err)
+			}
+		}
 		return fmt.Errorf("OpenAPI document does not conform to the specification: %w", err)
 	}
 	return nil
@@ -614,6 +702,23 @@ func (p *SwaggerParser) detectAndParseOpenAPI(data []byte) error {
 		}
 	}
 
+	if p.lenient {
+		changed := false
+		if p.redeclareVersionIn(jsonObj, openapiVersion) {
+			changed = true
+		}
+		if p.renameNonASCIIComponents(jsonObj) {
+			changed = true
+		}
+		if changed {
+			renormalised, err := json.Marshal(jsonObj)
+			if err != nil {
+				return fmt.Errorf("failed to renormalise the spec: %w", err)
+			}
+			data = renormalised
+		}
+	}
+
 	loader := openapi3.NewLoader()
 	doc, err := loader.LoadFromData(data)
 	if err != nil {
@@ -625,13 +730,201 @@ func (p *SwaggerParser) detectAndParseOpenAPI(data []byte) error {
 		return fmt.Errorf("failed to parse OpenAPI spec: document is empty")
 	}
 
-	if err := validateConformance(doc); err != nil {
+	if err := validateConformance(doc, p.lenient); err != nil {
 		return err
+	}
+	if p.lenient {
+		// 只在示例校验真的救了这份文档时才报：合规的文档开着宽松也不该产生噪声，
+		// 否则"有报告"就不再意味着"有东西被改了"。
+		if strict := doc.Validate(context.Background(),
+			openapi3.DisableSchemaPatternValidation()); strict != nil {
+			p.notices = append(p.notices, fmt.Sprintf(
+				"example values were not validated; at least one disagrees with its schema: %v"+
+					" / 已跳过 example 校验，其中至少一处与声明不符：%v", strict, strict))
+		}
 	}
 
 	logger.Info("Successfully parsed OpenAPI spec", zap.String("version", doc.OpenAPI))
 	p.doc = doc
 	return nil
+}
+
+// redeclareVersion reads a document by what it uses rather than what it claims.
+//
+// A document that declares 3.0.x while using `type: "null"` or a list of types is
+// a 3.1 document with a wrong version line: those constructs exist only in 3.1,
+// and 3.0 spells the same thing `nullable: true`. Reading it as 3.1 makes more of
+// it meaningful, not less.
+//
+// This is a choice between two contradictory declarations, so it is always
+// reported. Returns nil when nothing needed changing.
+func (p *SwaggerParser) redeclareVersionIn(doc map[string]interface{}, version interface{}) bool {
+	declared, _ := version.(string)
+	if !strings.HasPrefix(declared, "3.0") {
+		return false
+	}
+	where, found := findJSONSchema31Construct(doc, "")
+	if !found {
+		return false
+	}
+
+	doc["openapi"] = "3.1.0"
+	p.notices = append(p.notices, fmt.Sprintf(
+		"document declares OpenAPI %s but uses the 3.1-only construct at %s;"+
+			" read as 3.1.0 / 文档声明 %s 却用了 3.1 独有的写法（%s），按 3.1.0 读取",
+		declared, where, declared, where))
+	return true
+}
+
+// componentNameCharset is what OpenAPI allows for keys under components.
+var componentNameCharset = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+// renameNonASCIIComponents gives conformant names to components named in Chinese
+// or any other charset the specification does not allow.
+//
+// A component name is only an anchor for $ref: it appears in no request, no
+// response, and no tool contract. Renaming it — with every reference rewritten to
+// match — changes nothing about what the document means, which is what puts it in
+// the same class as ignoring a bad example rather than in the class of guessing at
+// a mistyped structural keyword.
+//
+// Naming schemas in Chinese is common in documents exported by Chinese tooling;
+// one real document had all seven of its schemas named that way, and refusing it
+// meant the merchant could not be onboarded at all.
+func (p *SwaggerParser) renameNonASCIIComponents(doc map[string]interface{}) bool {
+	components, ok := doc["components"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+
+	renames := map[string]string{}
+	for _, section := range sortedKeysOf(components) {
+		items, ok := components[section].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		taken := map[string]bool{}
+		for name := range items {
+			taken[name] = true
+		}
+		for _, name := range sortedKeysOf(items) {
+			if componentNameCharset.MatchString(name) {
+				continue
+			}
+			replacement := conformantName(name, taken)
+			taken[replacement] = true
+			items[replacement] = items[name]
+			delete(items, name)
+			renames[fmt.Sprintf("#/components/%s/%s", section, name)] =
+				fmt.Sprintf("#/components/%s/%s", section, replacement)
+			p.notices = append(p.notices, fmt.Sprintf(
+				"component %s.%s was renamed to %s: OpenAPI allows only [a-zA-Z0-9._-]"+
+					" in component names / 组件 %s.%s 改名为 %s（规范只允许 [a-zA-Z0-9._-]）",
+				section, name, replacement, section, name, replacement))
+		}
+	}
+	if len(renames) == 0 {
+		return false
+	}
+	rewriteRefs(doc, renames)
+	return true
+}
+
+// conformantName derives a usable name, keeping any ASCII the original had.
+//
+// A name derived from the original is worth the effort over a counter: it appears
+// in error messages and in $ref, and "schema_3" tells whoever is reading them
+// nothing about which schema went wrong.
+func conformantName(original string, taken map[string]bool) string {
+	var b strings.Builder
+	for _, r := range original {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			// One underscore per run of unusable characters, so a fully non-ASCII
+			// name does not become a row of underscores.
+			if s := b.String(); s != "" && !strings.HasSuffix(s, "_") {
+				b.WriteByte('_')
+			}
+		}
+	}
+	stem := strings.Trim(b.String(), "_")
+	if stem == "" {
+		stem = "Schema"
+	}
+	// Keep it stable and unique: the same input always yields the same name, and a
+	// collision appends a counter rather than silently overwriting a sibling.
+	sum := sha1.Sum([]byte(original))
+	candidate := fmt.Sprintf("%s_%s", stem, hex.EncodeToString(sum[:])[:8])
+	for i := 2; taken[candidate]; i++ {
+		candidate = fmt.Sprintf("%s_%s_%d", stem, hex.EncodeToString(sum[:])[:8], i)
+	}
+	return candidate
+}
+
+// rewriteRefs points every $ref at its component's new name.
+//
+// Missing one would turn a renamed component into a dangling reference, which the
+// loader reports as a missing schema — an error pointing at the rename rather than
+// at the document, and far from the original name anyone would search for.
+func rewriteRefs(node interface{}, renames map[string]string) {
+	switch v := node.(type) {
+	case map[string]interface{}:
+		if ref, ok := v["$ref"].(string); ok {
+			if replacement, found := renames[ref]; found {
+				v["$ref"] = replacement
+			}
+		}
+		for _, value := range v {
+			rewriteRefs(value, renames)
+		}
+	case []interface{}:
+		for _, item := range v {
+			rewriteRefs(item, renames)
+		}
+	}
+}
+
+// findJSONSchema31Construct reports the first 3.1-only type construct, if any.
+//
+// Only the first: the notice exists to tell someone which line to look at, and a
+// list of two hundred paths would not help them do that.
+func findJSONSchema31Construct(node interface{}, path string) (string, bool) {
+	switch v := node.(type) {
+	case map[string]interface{}:
+		if t, ok := v["type"]; ok {
+			if s, isString := t.(string); isString && s == "null" {
+				return path + `.type = "null"`, true
+			}
+			if _, isList := t.([]interface{}); isList {
+				return path + ".type = [ … ]", true
+			}
+		}
+		for _, key := range sortedKeysOf(v) {
+			if where, found := findJSONSchema31Construct(v[key], path+"."+key); found {
+				return where, true
+			}
+		}
+	case []interface{}:
+		for i, item := range v {
+			if where, found := findJSONSchema31Construct(item, fmt.Sprintf("%s[%d]", path, i)); found {
+				return where, true
+			}
+		}
+	}
+	return "", false
+}
+
+// sortedKeysOf keeps the reported path deterministic across runs.
+func sortedKeysOf(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // convertOpenAPI2to3 converts an OpenAPI 2.0 specification to OpenAPI 3.0
@@ -693,7 +986,20 @@ func (p *SwaggerParser) ParseReader(reader io.Reader) error {
 // processOperations iterates through paths and operations in the spec
 func (p *SwaggerParser) processOperations() error {
 	p.usedToolNames = map[string]bool{}
-	for path, pathItem := range p.doc.Paths.Map() {
+
+	// The document's paths live in a map, so walking it directly published a
+	// different tool order on every run. Nothing depends on the order for
+	// correctness, but an unstable one makes a captured tools/list impossible to
+	// diff and moves tools under any consumer that addresses them positionally.
+	paths := p.doc.Paths.Map()
+	ordered := make([]string, 0, len(paths))
+	for path := range paths {
+		ordered = append(ordered, path)
+	}
+	sort.Strings(ordered)
+
+	for _, path := range ordered {
+		pathItem := paths[path]
 		httpMethods := []struct {
 			Method    string
 			Operation *openapi3.Operation
@@ -710,6 +1016,9 @@ func (p *SwaggerParser) processOperations() error {
 				routeConfig := p.createRouteConfig(path, httpMethod.Method, httpMethod.Operation)
 				if p.adjuster.ExistsInMCP(routeConfig.Path, routeConfig.Method) {
 					tool := p.generateTool(routeConfig)
+					// Record the exposed name on the route so a per-request signer
+					// can tell which tool it is signing for.
+					routeConfig.MethodConfig.ToolName = tool.Name
 					p.routeTools = append(p.routeTools, &RouteTool{
 						RouteConfig:      routeConfig,
 						Tool:             tool,

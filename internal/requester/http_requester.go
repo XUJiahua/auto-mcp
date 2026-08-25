@@ -18,6 +18,8 @@ type HTTPRequester struct {
 	client     *http.Client
 	serviceCfg *config.EndpointConfig
 	authMgr    AuthManager
+	// signer computes per-request credentials, nil when the upstream needs none.
+	signer Signer
 }
 
 // NewRequester creates a requester for one upstream.
@@ -27,6 +29,11 @@ func NewRequester(endpoint *config.EndpointConfig, authManager AuthManager) *HTT
 		serviceCfg: endpoint,
 		authMgr:    authManager,
 	}
+}
+
+// SetSigner installs a per-request signer. A nil signer means the upstream needs none.
+func (r *HTTPRequester) SetSigner(signer Signer) {
+	r.signer = signer
 }
 
 // SetTimeout sets the timeout for the HTTP client
@@ -40,6 +47,7 @@ func (r *HTTPRequester) BuildRouteExecutor(config *RouteConfig) (RouteExecutor, 
 		serviceCfg:  r.serviceCfg,
 		authMgr:     r.authMgr,
 		routeConfig: config,
+		signer:      r.signer,
 	}
 
 	// Return a function that builds and executes the request

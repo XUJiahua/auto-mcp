@@ -14,7 +14,8 @@ API 的 HTTP 请求。文档进，MCP 出，中间不经过模型。
 - [6. 生成出来的工具长什么样](#6-生成出来的工具长什么样)
 - [7. 运维](#7-运维)
 - [8. 出错时怎么读](#8-出错时怎么读)
-- [9. 明确不做的事](#9-明确不做的事)
+- [9. 作为库嵌入](#9-作为库嵌入)
+- [10. 明确不做的事](#10-明确不做的事)
 
 ---
 
@@ -229,7 +230,7 @@ OAuth 2.1（含 PKCE、动态注册、GitHub/Google）是另一条路，见 [OAU
 # 只暴露这些路由；不写这一段就是全都暴露
 routes:
   - path: /pet/{petId}
-    methods: [get]
+    methods: [get] # 大小写不敏感,GET 也可以
   - path: /store/order
     methods: [post]
 
@@ -406,7 +407,40 @@ AUTO_MCP_LOGGING_LEVEL=debug ./auto-mcp --mode=http
 
 ---
 
-## 9. 明确不做的事
+## 9. 作为库嵌入
+
+除了独立进程,auto-mcp 也可以被另一个 Go 程序当库用:宿主自己拿一份 OpenAPI 文档,
+拿到工具,注册到**它自己的** `mcp.Server` 上。
+
+```go
+import "github.com/brizzai/auto-mcp/automcp"
+
+service, err := automcp.Build(automcp.Options{
+    Spec:       bytes.NewReader(specBytes),      // 文档从内存来,不必落文件
+    Adjustment: bytes.NewReader(adjustBytes),    // 可选
+    BaseURL:    "https://api.example.com",
+    Headers:    map[string]string{"X-API-Key": key}, // 凭证由宿主解析后交过来
+    Timeout:    30 * time.Second,
+})
+
+mcpServer := mcp.NewServer(&mcp.Implementation{Name: "host", Version: "1"}, nil)
+service.Register(mcpServer)     // 挂到宿主自己的 server 与路由上
+```
+
+对外只有 `Options` / `Service` / `Tool` 三个类型和 `Build` / `Register` / `Tools` /
+`SchemaBytes`。**其余全部留在 `internal/`**,这是有意的:把 parser、requester、security
+导出去,会连带把 auto-mcp 自己的部署配置与包级 logger 塞进宿主的编译期依赖,而宿主只需要
+这几个符号 —— 那样每次内部重构都会变成宿主的破坏性变更。
+
+分工也是有意的:**文档从哪来、注册到哪个 server、怎么对外服务、凭证怎么解析,都归宿主。**
+这个包只负责解析、构建、把工具交出去。`Headers` 是凭证的落点 —— 宿主解析,这里只负责携带;
+凭证有两个家,就会只在一个家里被轮换。
+
+`Build` 不发任何请求,所以可以只为了**预览**一份文档会产出什么而构建一次 ——
+`Tools()` 看工具面,`SchemaBytes()` 看体积,不合规则直接返回错误。上传型的接入界面
+需要的正是这个:在提交之前就把结果和拒绝原因摆在上传者眼前。
+
+## 10. 明确不做的事
 
 - **不校验入参。** MCP 的 schema 是给客户端看的契约，auto-mcp 不在调用前按它检查参数。
   校验错误由上游给出。

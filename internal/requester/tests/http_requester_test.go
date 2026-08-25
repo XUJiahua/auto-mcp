@@ -37,6 +37,12 @@ func TestHTTPRequester(t *testing.T) {
 			routeConfig: &requester.RouteConfig{
 				Path:   "/test",
 				Method: "GET",
+				// 声明这个查询参数：未声明的参数现在会被拒，因为把调用方的笔误
+				// 塞进查询串等于让它变成一个悄悄跑偏的请求。
+				MethodConfig: requester.MethodConfig{Params: []requester.ParamConfig{
+					{Name: "param1", In: requester.ParamInQuery, Type: "string", Explode: true},
+					{Name: "param2", In: requester.ParamInQuery, Type: "string", Explode: true},
+				}},
 			},
 			serviceConfig: &config.EndpointConfig{
 				Headers: nil,
@@ -71,6 +77,8 @@ func TestHTTPRequester(t *testing.T) {
 			routeConfig: &requester.RouteConfig{
 				Path:   "/test",
 				Method: "POST",
+				// 文档声明了请求体，这里才发体。
+				MethodConfig: requester.MethodConfig{BodyContentType: "application/json"},
 			},
 			serviceConfig: &config.EndpointConfig{
 				Headers: nil,

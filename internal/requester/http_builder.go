@@ -28,6 +28,8 @@ type HTTPRequestBuilderParams struct {
 	EndpointConfig *config.EndpointConfig
 	AuthManager    AuthManager
 	RouteConfig    *RouteConfig
+	// Signer computes per-request credentials. Optional.
+	Signer Signer `optional:"true"`
 }
 
 // HTTPRequestBuilder implements the RequestBuilder interface
@@ -35,6 +37,8 @@ type HTTPRequestBuilder struct {
 	serviceCfg  *config.EndpointConfig
 	authMgr     AuthManager
 	routeConfig *RouteConfig
+	// signer computes per-request credentials, nil when the upstream needs none.
+	signer Signer
 }
 
 // NewHTTPRequestBuilder creates a new HTTPRequestBuilder
@@ -43,6 +47,7 @@ func NewHTTPRequestBuilder(params HTTPRequestBuilderParams) *HTTPRequestBuilder 
 		serviceCfg:  params.EndpointConfig,
 		authMgr:     params.AuthManager,
 		routeConfig: params.RouteConfig,
+		signer:      params.Signer,
 	}
 }
 
@@ -59,17 +64,29 @@ func (b *HTTPRequestBuilder) BuildRequest(ctx context.Context, params map[string
 
 	byLocation := b.paramsByLocation()
 
+	if err := b.refuseUndeclared(params, byLocation); err != nil {
+		return nil, err
+	}
+
 	// Build URL, consuming the path parameters.
-	url, consumed, err := b.buildURL(b.routeConfig.Path, params, byLocation)
+	// The consumed set is no longer needed to keep path parameters out of the
+	// query string: undeclared arguments are refused above, and declared ones are
+	// placed only where their location says.
+	url, _, err := b.buildURL(b.routeConfig.Path, params, byLocation)
 	if err != nil {
 		return nil, err
 	}
-	url = b.addQueryParams(url, params, byLocation, consumed)
+	url = b.addQueryParams(url, params, byLocation)
 
-	// Create request body
-	body, contentType, err := b.createRequestBody(b.routeConfig, params)
+	// Create request body. The bytes are kept, not just a reader: a signature is
+	// computed over exactly these bytes, and a reader is consumed by the first read.
+	bodyBytes, contentType, err := b.createRequestBody(b.routeConfig, params)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request body: %w", err)
+	}
+	var body io.Reader
+	if len(bodyBytes) > 0 {
+		body = bytes.NewReader(bodyBytes)
 	}
 
 	// Merge headers
@@ -128,6 +145,27 @@ func (b *HTTPRequestBuilder) BuildRequest(ctx context.Context, params map[string
 		return nil, fmt.Errorf("failed to apply authentication: %w", err)
 	}
 
+	// Sign last, over the request as it will actually be sent. Anything added
+	// after this point would not be covered by the signature, and the mismatch
+	// would only show up as a rejection from the upstream.
+	if b.signer != nil {
+		signed, err := b.signer.SignRequest(ctx, SigningRequest{
+			Method:      httpReq.Method,
+			Path:        httpReq.URL.Path,
+			Query:       httpReq.URL.RawQuery,
+			Body:        bodyBytes,
+			ContentType: contentType,
+			Tool:        b.routeConfig.MethodConfig.ToolName,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to sign request: %w", err)
+		}
+		for key, value := range signed {
+			httpReq.Header.Set(key, value)
+			headers[key] = value
+		}
+	}
+
 	return &Request{
 		URL:         url,
 		Method:      b.routeConfig.Method,
@@ -136,6 +174,73 @@ func (b *HTTPRequestBuilder) BuildRequest(ctx context.Context, params map[string
 		ContentType: contentType,
 		HttpRequest: httpReq,
 	}, nil
+}
+
+// refuseUndeclared rejects arguments the document never declared.
+//
+// They used to be appended to the query string. That turned a caller's mistake
+// into a request that quietly went somewhere else: a model inventing a parameter
+// name got a 200 from an upstream that ignored it, or a rejection whose reason
+// pointed nowhere near the invented name. Refusing here is the only place that
+// still knows both what was asked for and what the document allows.
+//
+// The message lists the accepted names because the caller is usually a model:
+// it can correct itself from that list, and cannot from "unknown argument".
+func (b *HTTPRequestBuilder) refuseUndeclared(params map[string]interface{},
+	byLocation map[ParamLocation][]ParamConfig) error {
+
+	accepted := map[string]bool{}
+	for _, cfgs := range byLocation {
+		for _, cfg := range cfgs {
+			accepted[cfg.Arg()] = true
+		}
+	}
+	// The body is an argument only where the operation actually reads one.
+	// Accepting it everywhere would move the silent drop rather than remove it:
+	// a body handed to a GET was discarded without a word.
+	if b.acceptsBody() {
+		accepted["body"] = true
+	}
+	if upload := b.routeConfig.MethodConfig.FileUpload; upload != nil {
+		accepted[upload.FieldName] = true
+		for _, field := range b.routeConfig.MethodConfig.FormFields {
+			accepted[field] = true
+		}
+	}
+
+	var unknown []string
+	for name := range params {
+		if !accepted[name] {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+
+	allowed := make([]string, 0, len(accepted))
+	for name := range accepted {
+		allowed = append(allowed, name)
+	}
+	sort.Strings(allowed)
+	if len(allowed) == 0 {
+		return fmt.Errorf("%s %s accepts no arguments, but %s were given",
+			b.routeConfig.Method, b.routeConfig.Path, strings.Join(unknown, ", "))
+	}
+	return fmt.Errorf("%s %s does not declare %s; accepted arguments are %s",
+		b.routeConfig.Method, b.routeConfig.Path,
+		strings.Join(unknown, ", "), strings.Join(allowed, ", "))
+}
+
+// acceptsBody reports whether this operation reads a "body" argument.
+//
+// The authority is the document, not the method name: OpenAPI permits a request
+// body on DELETE, and forbids nothing on POST. BodyContentType is set exactly
+// when the spec declared one, so it answers the question directly.
+func (b *HTTPRequestBuilder) acceptsBody() bool {
+	return b.routeConfig.MethodConfig.FileUpload == nil &&
+		b.routeConfig.MethodConfig.BodyContentType != ""
 }
 
 // paramsByLocation groups the declared parameters so each stage can pick up its
@@ -209,20 +314,11 @@ func pathPlaceholders(url string) []string {
 // POST that takes both a body and a query parameter is common, and dropping the
 // query parameter makes the call fail in a way that looks like an upstream bug.
 func (b *HTTPRequestBuilder) addQueryParams(baseURL string, params map[string]interface{},
-	byLocation map[ParamLocation][]ParamConfig, consumed map[string]bool) string {
+	byLocation map[ParamLocation][]ParamConfig) string {
 
 	u, err := urlpkg.Parse(baseURL)
 	if err != nil {
 		return baseURL
-	}
-
-	// Keyed by argument name: this decides which of the caller's arguments have
-	// already been placed somewhere, not which upstream names exist.
-	declared := map[string]bool{}
-	for _, cfgs := range byLocation {
-		for _, cfg := range cfgs {
-			declared[cfg.Arg()] = true
-		}
 	}
 
 	q := u.Query()
@@ -248,14 +344,6 @@ func (b *HTTPRequestBuilder) addQueryParams(baseURL string, params map[string]in
 		if value, ok := params[cfg.Arg()]; ok {
 			add(cfg.Name, value, cfg.Explode)
 		}
-	}
-	// Undeclared arguments keep the previous behaviour of becoming query
-	// parameters; body and file are structural and never belong there.
-	for name, value := range params {
-		if declared[name] || consumed[name] || name == "body" || name == "file" {
-			continue
-		}
-		add(name, value, true)
 	}
 
 	u.RawQuery = q.Encode()
@@ -332,34 +420,30 @@ func flattenParamValue(value any) []string {
 	}
 }
 
-func (b *HTTPRequestBuilder) createRequestBody(routeConfig *RouteConfig, params map[string]interface{}) (io.Reader, string, error) {
-	switch routeConfig.Method {
-	case "GET":
-		return nil, "", nil
-
-	case "POST", "PUT", "PATCH":
-		// Handle multipart/form-data
-		if routeConfig.MethodConfig.FileUpload != nil {
-			return b.createMultipartBody(routeConfig, params)
-		}
-
-		body, ok := params["body"]
-		if !ok {
-			return nil, "", nil
-		}
-		return encodeBody(body, routeConfig.MethodConfig.BodyContentType)
-
-	default:
-		// For other methods, just send the params as JSON if not nil
-		if params != nil {
-			jsonData, err := json.Marshal(params)
-			if err != nil {
-				return nil, "", fmt.Errorf("failed to marshal request body: %w", err)
-			}
-			return bytes.NewBuffer(jsonData), "application/json", nil
-		}
+// createRequestBody produces the request body the document declared, if any.
+//
+// A body goes out only where the spec declares one. The method name is not the
+// judge: OpenAPI permits a request body on DELETE and requires none on POST.
+//
+// This replaces a fallback that marshalled *every* argument as JSON for any
+// method outside GET/POST/PUT/PATCH. On DELETE /pet/{petId} that shipped
+// {"petId":10} as a JSON body — a path parameter already substituted into the
+// URL, resent as a body the document never mentioned, under a Content-Type
+// claiming JSON. Upstreams that reject unexpected DELETE bodies failed for a
+// reason pointing nowhere near the cause, and intermediaries are free to drop
+// such a body entirely.
+func (b *HTTPRequestBuilder) createRequestBody(routeConfig *RouteConfig, params map[string]interface{}) ([]byte, string, error) {
+	if routeConfig.MethodConfig.FileUpload != nil {
+		return b.createMultipartBody(routeConfig, params)
+	}
+	if routeConfig.MethodConfig.BodyContentType == "" {
 		return nil, "", nil
 	}
+	body, ok := params["body"]
+	if !ok {
+		return nil, "", nil
+	}
+	return encodeBody(body, routeConfig.MethodConfig.BodyContentType)
 }
 
 // encodeBody serialises the body argument for the media type the spec declared.
@@ -370,7 +454,7 @@ func (b *HTTPRequestBuilder) createRequestBody(routeConfig *RouteConfig, params 
 // Content-Type: application/json, so a form-encoded endpoint received JSON while
 // being told it was form data, and the upstream rejected it for reasons that
 // pointed nowhere near the cause.
-func encodeBody(body any, mediaType string) (io.Reader, string, error) {
+func encodeBody(body any, mediaType string) ([]byte, string, error) {
 	switch {
 	case mediaType == "application/x-www-form-urlencoded":
 		fields, ok := body.(map[string]any)
@@ -383,13 +467,13 @@ func encodeBody(body any, mediaType string) (io.Reader, string, error) {
 				values.Add(name, item)
 			}
 		}
-		return strings.NewReader(values.Encode()), mediaType, nil
+		return []byte(values.Encode()), mediaType, nil
 
 	case isTextualMediaType(mediaType):
 		// A textual body given as a string is sent as written; wrapping it in JSON
 		// quotes would change the bytes the upstream reads.
 		if text, ok := body.(string); ok {
-			return strings.NewReader(text), mediaType, nil
+			return []byte(text), mediaType, nil
 		}
 	}
 
@@ -403,12 +487,12 @@ func encodeBody(body any, mediaType string) (io.Reader, string, error) {
 		// reported here rather than left for the upstream to discover.
 		logger.Warn("Request body media type is not supported; sending JSON",
 			zap.String("declared", mediaType))
-		return bytes.NewBuffer(jsonData), "application/json", nil
+		return jsonData, "application/json", nil
 	}
 	if mediaType == "" {
 		mediaType = "application/json"
 	}
-	return bytes.NewBuffer(jsonData), mediaType, nil
+	return jsonData, mediaType, nil
 }
 
 func isJSONMediaType(mediaType string) bool {
@@ -428,7 +512,7 @@ func sortedKeys(m map[string]any) []string {
 	return out
 }
 
-func (b *HTTPRequestBuilder) createMultipartBody(routeConfig *RouteConfig, params map[string]interface{}) (io.Reader, string, error) {
+func (b *HTTPRequestBuilder) createMultipartBody(routeConfig *RouteConfig, params map[string]interface{}) ([]byte, string, error) {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
@@ -456,5 +540,5 @@ func (b *HTTPRequestBuilder) createMultipartBody(routeConfig *RouteConfig, param
 		return nil, "", fmt.Errorf("failed to close multipart writer: %w", err)
 	}
 
-	return body, writer.FormDataContentType(), nil
+	return body.Bytes(), writer.FormDataContentType(), nil
 }
