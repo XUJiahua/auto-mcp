@@ -30,6 +30,9 @@ type HTTPRequestBuilderParams struct {
 	RouteConfig    *RouteConfig
 	// Signer computes per-request credentials. Optional.
 	Signer Signer `optional:"true"`
+	// URLBuilder and BodyBuilder let the host rewrite what gets sent. Optional.
+	URLBuilder  URLBuilder  `optional:"true"`
+	BodyBuilder BodyBuilder `optional:"true"`
 }
 
 // HTTPRequestBuilder implements the RequestBuilder interface
@@ -39,6 +42,9 @@ type HTTPRequestBuilder struct {
 	routeConfig *RouteConfig
 	// signer computes per-request credentials, nil when the upstream needs none.
 	signer Signer
+	// urlBuilder and bodyBuilder are host hooks, nil when the document is enough.
+	urlBuilder  URLBuilder
+	bodyBuilder BodyBuilder
 }
 
 // NewHTTPRequestBuilder creates a new HTTPRequestBuilder
@@ -48,6 +54,8 @@ func NewHTTPRequestBuilder(params HTTPRequestBuilderParams) *HTTPRequestBuilder 
 		authMgr:     params.AuthManager,
 		routeConfig: params.RouteConfig,
 		signer:      params.Signer,
+		urlBuilder:  params.URLBuilder,
+		bodyBuilder: params.BodyBuilder,
 	}
 }
 
@@ -83,6 +91,34 @@ func (b *HTTPRequestBuilder) BuildRequest(ctx context.Context, params map[string
 	bodyBytes, contentType, err := b.createRequestBody(b.routeConfig, params)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request body: %w", err)
+	}
+
+	// Host hooks get to rewrite the URL and the body.
+	//
+	// Both run before signing, so a signature covers exactly what will be sent.
+	// The body hook runs after the default one so that it sees the default output:
+	// most upstreams want that wrapped or renamed, not built from nothing.
+	hookReq := BuildRequest{
+		Method: b.routeConfig.Method, Path: b.routeConfig.Path, URL: url,
+		Args: params, Body: bodyBytes, ContentType: contentType,
+	}
+	if b.urlBuilder != nil {
+		rewritten, err := b.urlBuilder.BuildURL(ctx, hookReq)
+		if err != nil {
+			return nil, fmt.Errorf("url builder: %w", err)
+		}
+		url = rewritten
+		hookReq.URL = rewritten
+	}
+	if b.bodyBuilder != nil {
+		rewritten, ct, err := b.bodyBuilder.BuildBody(ctx, hookReq)
+		if err != nil {
+			return nil, fmt.Errorf("body builder: %w", err)
+		}
+		bodyBytes = rewritten
+		if ct != "" {
+			contentType = ct
+		}
 	}
 	var body io.Reader
 	if len(bodyBytes) > 0 {

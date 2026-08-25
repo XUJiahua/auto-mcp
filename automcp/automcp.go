@@ -64,6 +64,12 @@ type Options struct {
 	// and the algorithm, auto-mcp only tells it what is about to be sent and
 	// carries what comes back.
 	Signer Signer
+	// URLBuilder rewrites the URL for each request. Optional; without it the URL
+	// comes from the document exactly as before.
+	URLBuilder URLBuilder
+	// BodyBuilder rewrites the request body. Optional. It runs before Signer, so
+	// what gets signed is what gets sent.
+	BodyBuilder BodyBuilder
 
 	// Lenient normalises a document that is conformant in substance but not in
 	// letter, instead of refusing it. Off by default.
@@ -105,6 +111,51 @@ type SignerFunc func(ctx context.Context, req SigningRequest) (map[string]string
 
 // SignRequest implements Signer.
 func (f SignerFunc) SignRequest(ctx context.Context, req SigningRequest) (map[string]string, error) {
+	return f(ctx, req)
+}
+
+// BuildRequest is what a URL or body builder sees.
+//
+// It carries both the operation as the document declares it (Method, Path) and
+// what the platform computed by default (URL, Body, ContentType). A hook needs
+// both: the template says which operation this is, the default says what would
+// have been sent.
+type BuildRequest = requester.BuildRequest
+
+// URLBuilder computes the URL for a request.
+//
+// It exists because a real supplier's path rules are often absent from the
+// document. Shixin/Flink is the case that forced it: dictionaries live under
+// /api/{lang}/…, flights under /api/v2/{lang}/…, and one endpoint is the literal
+// /api/lang/fields. Without a hook the only way to express that is to hand-write
+// every route into an adjustment file — which puts merchant-specific logic in a
+// place that was never meant to carry it.
+//
+// Returning an error stops the request. Sending a half-built one would only earn
+// a rejection whose message cannot say which part was wrong.
+type URLBuilder = requester.URLBuilder
+
+// URLBuilderFunc adapts a plain function to URLBuilder.
+type URLBuilderFunc func(ctx context.Context, req BuildRequest) (string, error)
+
+// BuildURL implements URLBuilder.
+func (f URLBuilderFunc) BuildURL(ctx context.Context, req BuildRequest) (string, error) {
+	return f(ctx, req)
+}
+
+// BodyBuilder computes the request body.
+//
+// It runs *before* the signer, so a signature is computed over the bytes this
+// returns. The other order would produce a signature over bytes that were never
+// sent, and the symptom is every call being rejected with a message that cannot
+// point at the cause.
+type BodyBuilder = requester.BodyBuilder
+
+// BodyBuilderFunc adapts a plain function to BodyBuilder.
+type BodyBuilderFunc func(ctx context.Context, req BuildRequest) ([]byte, string, error)
+
+// BuildBody implements BodyBuilder.
+func (f BodyBuilderFunc) BuildBody(ctx context.Context, req BuildRequest) ([]byte, string, error) {
 	return f(ctx, req)
 }
 
@@ -167,6 +218,12 @@ func Build(opts Options) (*Service, error) {
 	)
 	if opts.Timeout > 0 {
 		upstream.SetTimeout(opts.Timeout)
+	}
+	if opts.URLBuilder != nil {
+		upstream.SetURLBuilder(opts.URLBuilder)
+	}
+	if opts.BodyBuilder != nil {
+		upstream.SetBodyBuilder(opts.BodyBuilder)
 	}
 	if opts.Signer != nil {
 		upstream.SetSigner(opts.Signer)

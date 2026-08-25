@@ -20,6 +20,9 @@ type HTTPRequester struct {
 	authMgr    AuthManager
 	// signer computes per-request credentials, nil when the upstream needs none.
 	signer Signer
+	// urlBuilder 与 bodyBuilder 是宿主钩子，为 nil 时文档本身就够。
+	urlBuilder  URLBuilder
+	bodyBuilder BodyBuilder
 }
 
 // NewRequester creates a requester for one upstream.
@@ -36,6 +39,18 @@ func (r *HTTPRequester) SetSigner(signer Signer) {
 	r.signer = signer
 }
 
+// SetURLBuilder installs a host hook that rewrites the URL for each request.
+func (r *HTTPRequester) SetURLBuilder(b URLBuilder) {
+	r.urlBuilder = b
+}
+
+// SetBodyBuilder installs a host hook that rewrites the request body.
+//
+// It runs before the signer, so a signature covers exactly what will be sent.
+func (r *HTTPRequester) SetBodyBuilder(b BodyBuilder) {
+	r.bodyBuilder = b
+}
+
 // SetTimeout sets the timeout for the HTTP client
 func (r *HTTPRequester) SetTimeout(timeout time.Duration) {
 	r.client.Timeout = timeout
@@ -45,6 +60,8 @@ func (r *HTTPRequester) SetTimeout(timeout time.Duration) {
 func (r *HTTPRequester) BuildRouteExecutor(config *RouteConfig) (RouteExecutor, error) {
 	builder := &HTTPRequestBuilder{
 		serviceCfg:  r.serviceCfg,
+		urlBuilder:  r.urlBuilder,
+		bodyBuilder: r.bodyBuilder,
 		authMgr:     r.authMgr,
 		routeConfig: config,
 		signer:      r.signer,
